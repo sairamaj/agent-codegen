@@ -92,17 +92,23 @@ def _utc_ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def open_structured_logger(destination: str) -> tuple[StructuredLogger, Callable[[], None]]:
+def open_structured_logger(
+    destination: str,
+    *,
+    trace_id: str | None = None,
+    session_id: str | None = None,
+) -> tuple[StructuredLogger, Callable[[], None]]:
     """
     Open a logger writing to stderr or append to a file.
 
     Returns ``(logger, close)`` — ``close`` is a no-op for stderr; for files it closes the handle.
+    When ``trace_id`` / ``session_id`` are omitted, new UUIDs are generated (and match each other).
     """
     dest = normalize_structured_log_destination(destination)
     if dest is None:
         raise ValueError("structured log destination is empty")
-    tid = new_trace_id()
-    sid = tid
+    tid = trace_id or new_trace_id()
+    sid = session_id or tid
     if dest == "stderr":
 
         def _write(s: str) -> None:

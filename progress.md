@@ -4,6 +4,22 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
+## 2026-03-29 — Epic P1-E3: Session audit
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P1-08 | Done | **`session_audit`** config + `CODEGEN_SESSION_AUDIT`: append-only **NDJSON** with `audit.run_start`, ordered **`audit.tool`** (`seq`, `tool_call_id`, `tool_name`, `args_sanitized`, `result_sanitized` capped/redacted, `duration_ms`, `outcome`), `audit.run_end`. Same **`trace_id` / `session_id`** as structured log when both enabled (`open_structured_logger(..., trace_id=..., session_id=...)`). Module: `codegen.session_audit`; wired in `agent_loop` + `cli run`. |
+| P1-09 | Done | **System prompt** instructs the model to ask a **short clarifying question** before substantive `apply_patch` / `run_terminal_cmd` when the task is ambiguous or missing critical detail (`cli._build_system_prompt`). |
+
+**Code / tests**
+
+- `codegen.session_audit`, `codegen.observability` (optional trace/session ids for structured logger), `codegen.config` (`session_audit`, `CODEGEN_SESSION_AUDIT`), `codegen.agent_loop`, `codegen.cli` (`info` shows `session_audit`), `.env.example`.
+- Tests: `tests/test_session_audit.py`, `tests/test_agent_loop.py` (`test_session_audit_ordered_tool_records`), `tests/test_observability.py`, `tests/test_config.py`, `tests/test_cli.py`.
+
+---
+
 ## 2026-03-29 — Epic P1-E2: Terminal and policy
 
 **Stories**

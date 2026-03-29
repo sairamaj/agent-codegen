@@ -87,3 +87,37 @@ def test_run_accepts_workspace_after_task(tmp_path: Path) -> None:
     assert "No such option" not in out
     assert r.returncode == 2
     assert "OPENAI_API_KEY" in out or "not set" in out.lower()
+
+
+def test_run_requires_task_without_interactive(tmp_path: Path) -> None:
+    r = _run("-w", str(tmp_path), "run")
+    assert r.returncode == 2
+    out = r.stdout + r.stderr
+    assert "TASK" in out or "interactive" in out.lower()
+
+
+def test_run_interactive_requires_tty(tmp_path: Path) -> None:
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    prev = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(_SRC) + (os.pathsep + prev if prev else "")
+    r = subprocess.run(
+        [sys.executable, "-m", "codegen", "-w", str(tmp_path), "run", "-i"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        stdin=subprocess.DEVNULL,
+    )
+    assert r.returncode == 2
+    out = r.stdout + r.stderr
+    assert "TTY" in out or "terminal" in out.lower() or "stdin" in out.lower()
+
+
+def test_system_prompt_includes_clarifying_question_guidance() -> None:
+    """P1-09 (FR-TASK-3): model is instructed to ask before substantive edits when ambiguous."""
+    import codegen.cli as cli_mod
+
+    for mode in ("plan", "execute"):
+        text = cli_mod._build_system_prompt("/workspace", None, agent_mode=mode)
+        assert "clarifying" in text.lower()

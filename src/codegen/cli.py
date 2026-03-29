@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from collections.abc import Callable
 from typing import Annotated, Any, Literal, Optional
@@ -9,11 +10,16 @@ from typing import Annotated, Any, Literal, Optional
 import typer
 
 from codegen import __version__
-from codegen.agent_loop import run_agent_task
+from codegen.agent_loop import AgentRunResult, run_agent_task
 from codegen.bootstrap import bootstrap
 from codegen.config import CodegenConfigError
 from codegen.console import make_console
-from codegen.observability import normalize_structured_log_destination, open_structured_logger
+from codegen.observability import (
+    new_trace_id,
+    normalize_structured_log_destination,
+    open_structured_logger,
+)
+from codegen.session_audit import normalize_session_audit_path, open_session_audit
 from codegen.workspace import WorkspaceError
 
 app = typer.Typer(
@@ -22,16 +28,18 @@ app = typer.Typer(
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Workspace-scoped coding agent. Use ``codegen -w DIR run TASK`` or "
-        "``codegen run TASK -w DIR`` (same for ``info``).\n\n"
-        "Run-only flags (``--mode plan|execute``, ``--yes``, …) are on the ``run`` subcommand — "
+        "``codegen run TASK -w DIR``; use ``codegen run -i`` for an interactive task loop "
+        "(same for ``info``).\n\n"
+        "Run-only flags (``--mode plan|execute``, ``--yes``, ``-i``, …) are on the ``run`` subcommand — "
         "use ``codegen run --help`` to list them; they do not appear on this top-level help.\n\n"
         "Config: TOML file via --config, CODEGEN_CONFIG, or <workspace>/codegen.toml; "
         "optional .env under workspace or a parent dir (loaded before env merge). "
         "Keys: model, base_url, max_iterations, max_wall_clock_seconds, agents_md. "
         "Environment: OPENAI_API_KEY (secret, never printed), OPENAI_BASE_URL, OPENAI_MODEL, "
         "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG, "
-        "CODEGEN_STRUCTURED_LOG, CODEGEN_COMMAND_ALLOWLIST, CODEGEN_COMMAND_DENYLIST, "
-        "CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, CODEGEN_SHELL_MAX_OUTPUT_BYTES."
+        "CODEGEN_STRUCTURED_LOG, CODEGEN_SESSION_AUDIT, CODEGEN_COMMAND_ALLOWLIST, "
+        "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
+        "CODEGEN_SHELL_MAX_OUTPUT_BYTES."
     ),
 )
 
@@ -150,6 +158,8 @@ def info_cmd(
         console.print("set" if summary["openai_api_key_set"] else "not set")
         console.print("[muted]structured_log:[/muted] ", end="")
         console.print(summary["structured_log"] or "(off)")
+        console.print("[muted]session_audit:[/muted] ", end="")
+        console.print(summary["session_audit"] or "(off)")
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -176,6 +186,9 @@ def _build_system_prompt(
         f"Workspace root: {workspace_display}",
         tools_line + "Paths are relative to the workspace.",
         "Prefer tools over guessing file contents.",
+        "If the task is ambiguous or missing critical detail (which path, API version, scope, or "
+        "expected behavior), ask a short clarifying question before using apply_patch or "
+        "run_terminal_cmd for substantive changes.",
     ]
     if project_rules:
         parts.append("Project rules (follow when relevant):\n" + project_rules)
@@ -194,10 +207,18 @@ def _merged_workspace_config(
     return w, c
 
 
+def _interactive_repl_quit(line: str) -> bool:
+    t = line.strip().lower()
+    return t in ("exit", "quit", ":q")
+
+
 @app.command("run")
 def run_cmd(
     ctx: typer.Context,
-    task: Annotated[str, typer.Argument(help="Task in natural language.")],
+    task: Annotated[
+        Optional[str],
+        typer.Argument(help="Task in natural language. Omit with --interactive to type tasks in the shell."),
+    ] = None,
     workspace: Annotated[
         Optional[Path],
         typer.Option(
@@ -228,6 +249,14 @@ def run_cmd(
             help="Auto-approve shell commands that would otherwise require a TTY prompt.",
         ),
     ] = False,
+    interactive: Annotated[
+        bool,
+        typer.Option(
+            "--interactive",
+            "-i",
+            help="Prompt for tasks until you type exit or quit (requires a TTY).",
+        ),
+    ] = False,
 ) -> None:
     """Run the agent: OpenAI drives tools; output is streamed."""
     console = make_console()
@@ -247,31 +276,95 @@ def run_cmd(
         raise typer.Exit(2)
     agent_mode: Literal["plan", "execute"] = "plan" if mode == "plan" else "execute"
 
+    task_stripped = (task or "").strip()
+    if not interactive and not task_stripped:
+        console.print(
+            "[error]TASK is required unless you pass --interactive (-i).[/error]",
+        )
+        raise typer.Exit(2)
+
     system = _build_system_prompt(
         str(result.workspace),
         result.project_rules_text,
         agent_mode=agent_mode,
     )
+    trace_id = new_trace_id()
+    session_id = trace_id
     log_dest = normalize_structured_log_destination(result.config.structured_log)
+    audit_path = normalize_session_audit_path(result.config.session_audit)
     close_log: Callable[[], None] | None = None
+    close_audit: Callable[[], None] | None = None
     structured_logger = None
+    session_audit_writer = None
     if log_dest:
-        structured_logger, close_log = open_structured_logger(log_dest)
-    try:
-        out = run_agent_task(
+        structured_logger, close_log = open_structured_logger(
+            log_dest, trace_id=trace_id, session_id=session_id
+        )
+    if audit_path:
+        session_audit_writer, close_audit = open_session_audit(
+            audit_path, trace_id=trace_id, session_id=session_id
+        )
+
+    def _run_one(user_message: str) -> AgentRunResult:
+        return run_agent_task(
             workspace=result.workspace,
             config=result.config,
             system_prompt=system,
-            user_message=task,
+            user_message=user_message,
             console=console,
             structured_logger=structured_logger,
+            session_audit=session_audit_writer,
             agent_mode=agent_mode,
             auto_approve=auto_approve,
         )
+
+    try:
+        if not interactive:
+            out = _run_one(task_stripped)
+            raise typer.Exit(out.exit_code)
+
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            console.print(
+                "[error]Interactive mode requires a terminal (stdin and stdout must be TTYs).[/error]",
+            )
+            raise typer.Exit(2)
+
+        console.print(
+            "[muted]Interactive mode — enter tasks (or exit, quit, :q, or Ctrl+Z then Enter on Windows / Ctrl+D on Unix). "
+            "Empty lines are skipped.[/muted]",
+        )
+        console.print()
+
+        last_exit = 0
+        pending: list[str] = []
+        if task_stripped:
+            pending.append(task_stripped)
+
+        while True:
+            if not pending:
+                console.print("[muted]codegen>[/muted] ", end="")
+                try:
+                    line = input()
+                except EOFError:
+                    console.print()
+                    break
+                if _interactive_repl_quit(line):
+                    break
+                if not line.strip():
+                    continue
+                pending.append(line.strip())
+
+            user_message = pending.pop(0)
+            out = _run_one(user_message)
+            last_exit = out.exit_code
+            console.print()
+
+        raise typer.Exit(last_exit)
     finally:
         if close_log is not None:
             close_log()
-    raise typer.Exit(out.exit_code)
+        if close_audit is not None:
+            close_audit()
 
 
 def run() -> None:

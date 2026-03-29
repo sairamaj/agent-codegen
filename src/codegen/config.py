@@ -32,6 +32,7 @@ class CodegenConfig(BaseModel):
     - OPENAI_MODEL — optional model name override.
     - CODEGEN_CONFIG — path to TOML config file when --config is not passed.
     - CODEGEN_STRUCTURED_LOG — optional JSONL log target: ``stderr``, ``-``, or a file path.
+    - CODEGEN_SESSION_AUDIT — optional NDJSON file path for ordered tool I/O (P1-08).
     - CODEGEN_COMMAND_ALLOWLIST — comma-separated fnmatch patterns (optional).
     - CODEGEN_COMMAND_DENYLIST — comma-separated patterns; set to empty string ``""`` for no deny rules.
     - CODEGEN_COMMAND_REQUIRE_APPROVAL — comma-separated patterns; empty string for none.
@@ -53,6 +54,10 @@ class CodegenConfig(BaseModel):
     structured_log: str | None = Field(
         default=None,
         description='JSONL structured logs: unset = off, "stderr", or a file path.',
+    )
+    session_audit: str | None = Field(
+        default=None,
+        description="Append-only NDJSON path for session tool audit (ordered args + results).",
     )
     # P1-E2: shell policy (None = use built-in defaults for deny/require_approval)
     command_allowlist: list[str] = Field(
@@ -94,6 +99,7 @@ class CodegenConfig(BaseModel):
             "agents_md": self.agents_md,
             "openai_api_key_set": bool(self.openai_api_key),
             "structured_log": self._structured_log_public(),
+            "session_audit": self._session_audit_public(),
             "command_allowlist": list(self.command_allowlist),
             "command_denylist": "default" if self.command_denylist is None else list(self.command_denylist),
             "command_require_approval": (
@@ -112,6 +118,14 @@ class CodegenConfig(BaseModel):
             return None
         if n == "stderr":
             return "stderr"
+        return f"file:{Path(n).name}"
+
+    def _session_audit_public(self) -> str | None:
+        from codegen.session_audit import normalize_session_audit_path
+
+        n = normalize_session_audit_path(self.session_audit)
+        if n is None:
+            return None
         return f"file:{Path(n).name}"
 
 
@@ -203,7 +217,8 @@ def load_config(
     existing process env vars still win over ``.env`` entries.
 
     TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md,
-    structured_log (``stderr``, a path, or omit), command_allowlist, command_denylist,
+    structured_log (``stderr``, a path, or omit), session_audit (file path or omit),
+    command_allowlist, command_denylist,
     command_require_approval, shell_timeout_seconds, shell_max_output_bytes.
     """
     file_data: dict[str, Any] = {}
@@ -233,6 +248,8 @@ def load_config(
         merged["agents_md"] = p
     if (sl := os.environ.get("CODEGEN_STRUCTURED_LOG", "").strip()):
         merged["structured_log"] = sl
+    if (sa := os.environ.get("CODEGEN_SESSION_AUDIT", "").strip()):
+        merged["session_audit"] = sa
 
     if (raw := os.environ.get("CODEGEN_COMMAND_ALLOWLIST", "").strip()):
         merged["command_allowlist"] = _split_csv_list(raw)

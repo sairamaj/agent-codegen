@@ -93,3 +93,10 @@ def test_invalid_codegen_max_iterations_env(tmp_path: Path, monkeypatch: pytest.
 
 def test_resolve_config_file_path_none_when_no_file(tmp_path: Path) -> None:
     assert resolve_config_file_path(workspace=tmp_path, config_path=None) is None
+
+
+def test_session_audit_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEGEN_SESSION_AUDIT", str(tmp_path / "a.jsonl"))
+    cfg = load_config(workspace=tmp_path)
+    assert cfg.session_audit == str(tmp_path / "a.jsonl")
+    assert cfg.redacted_summary()["session_audit"] == "file:a.jsonl"

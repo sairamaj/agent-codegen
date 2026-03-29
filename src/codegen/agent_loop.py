@@ -19,6 +19,7 @@ from codegen.config import CodegenConfig
 from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
 from codegen.observability import StructuredLogger, sanitize_args_for_log, tool_result_outcome
+from codegen.session_audit import SessionAuditWriter
 from codegen.tool_dispatch import ToolDispatchContext
 from codegen.tools_readonly import execute_tool, tool_definitions_for_mode
 
@@ -157,6 +158,7 @@ def run_agent_task(
     console: Console,
     client: OpenAI | None = None,
     structured_logger: StructuredLogger | None = None,
+    session_audit: SessionAuditWriter | None = None,
     agent_mode: Literal["plan", "execute"] = "execute",
     auto_approve: bool = False,
 ) -> AgentRunResult:
@@ -166,6 +168,7 @@ def run_agent_task(
     Streams assistant text to ``console`` (P0-07). Enforces ``max_iterations`` and
     ``max_wall_clock_seconds`` (P0-06). Tool failures are JSON strings (P0-08).
     ``agent_mode=plan`` exposes only read-only tools (P1-06); ``execute`` adds patch + shell.
+    Optional ``session_audit`` appends per-run NDJSON (P1-08) with ordered tool records.
     """
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
@@ -188,6 +191,13 @@ def run_agent_task(
                 exit_code=exit_code,
                 stop_reason=stop_reason,
                 iterations_used=iterations_used,
+            )
+        if session_audit is not None and audit_started:
+            session_audit.run_end(
+                exit_code=exit_code,
+                stop_reason=stop_reason,
+                iterations_used=iterations_used,
+                tool_calls_count=len(all_records),
             )
         return AgentRunResult(
             exit_code=exit_code,
@@ -228,8 +238,11 @@ def run_agent_task(
         {"role": "user", "content": user_message},
     ]
 
+    all_records: list[ToolCallRecord] = []
+    iterations = 0
+    audit_started = False
+    task_preview = redact_secrets_in_text(format_user_task_preview(user_message))
     if structured_logger is not None:
-        task_preview = redact_secrets_in_text(format_user_task_preview(user_message))
         structured_logger.emit(
             "run.start",
             workspace=str(workspace),
@@ -240,10 +253,19 @@ def run_agent_task(
             agent_mode=agent_mode,
             auto_approve_shell=auto_approve,
         )
+    if session_audit is not None:
+        session_audit.run_start(
+            workspace=str(workspace),
+            model=config.model,
+            task_preview=task_preview,
+            max_iterations=config.max_iterations,
+            max_wall_clock_seconds=config.max_wall_clock_seconds,
+            agent_mode=agent_mode,
+            auto_approve_shell=auto_approve,
+        )
+        audit_started = True
 
     deadline = time.monotonic() + float(config.max_wall_clock_seconds)
-    all_records: list[ToolCallRecord] = []
-    iterations = 0
 
     try:
         while True:
@@ -347,6 +369,14 @@ def run_agent_task(
                             tool_name=name,
                             duration_ms=duration_ms,
                             **outcome,
+                        )
+                    if session_audit is not None:
+                        session_audit.tool_record(
+                            tool_call_id=tid,
+                            tool_name=name,
+                            args_json=raw_args,
+                            result_json=result,
+                            duration_ms=duration_ms,
                         )
                     all_records.append(ToolCallRecord(name=name, arguments=raw_args, result=result))
                     messages.append(

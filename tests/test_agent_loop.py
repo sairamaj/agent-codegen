@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -14,6 +15,7 @@ from openai import APIConnectionError
 from codegen.agent_loop import run_agent_task
 from codegen.console import make_console
 from codegen.config import CodegenConfig
+from codegen.session_audit import open_session_audit
 
 
 class _FakeStream:
@@ -109,6 +111,69 @@ def test_tool_round_trip_then_text(tmp_path: Path) -> None:
     assert out.iterations_used == 2
     assert len(out.tool_calls) == 1
     assert out.tool_calls[0].name == "list_dir"
+
+
+def test_session_audit_ordered_tool_records(tmp_path: Path) -> None:
+    """P1-08: NDJSON audit lists tools in order with args and truncated results."""
+    cfg = CodegenConfig(
+        model="gpt-4o-mini",
+        openai_api_key="sk-test",
+        max_iterations=5,
+        max_wall_clock_seconds=60,
+    )
+    client = MagicMock()
+    stream1 = _FakeStream(
+        [
+            _FakeChunk(
+                _FakeDelta(
+                    tool_calls=[
+                        _FakeToolCallDelta(
+                            0,
+                            "call_a",
+                            "list_dir",
+                            '{"path": ".", "depth": 1, "max_entries": 10}',
+                        )
+                    ]
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    stream2 = _FakeStream(
+        [
+            _FakeChunk(_FakeDelta(), finish_reason="stop"),
+        ]
+    )
+    client.chat.completions.create.side_effect = [stream1, stream2]
+
+    audit_path = tmp_path / "audit.jsonl"
+    writer, close = open_session_audit(str(audit_path), trace_id="trace-x", session_id="sess-x")
+    try:
+        out = run_agent_task(
+            workspace=tmp_path,
+            config=cfg,
+            system_prompt="test",
+            user_message="list files",
+            console=make_console(force_color=False),
+            client=client,
+            session_audit=writer,
+        )
+    finally:
+        close()
+
+    assert out.exit_code == 0
+
+    events = [json.loads(line) for line in audit_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert events[0]["event"] == "audit.run_start"
+    assert events[0]["trace_id"] == "trace-x"
+    tools = [e for e in events if e["event"] == "audit.tool"]
+    assert len(tools) == 1
+    assert tools[0]["seq"] == 1
+    assert tools[0]["tool_call_id"] == "call_a"
+    assert tools[0]["tool_name"] == "list_dir"
+    assert "args_sanitized" in tools[0] and "result_sanitized" in tools[0]
+    assert events[-1]["event"] == "audit.run_end"
+    assert events[-1]["tool_calls_count"] == 1
 
 
 def test_api_connection_error_reports_stop_reason(tmp_path: Path) -> None:

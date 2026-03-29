@@ -68,6 +68,18 @@ def test_open_structured_logger_file(tmp_path: Path) -> None:
     assert len(d["trace_id"]) == 36
 
 
+def test_open_structured_logger_respects_trace_ids(tmp_path: Path) -> None:
+    p = tmp_path / "x.jsonl"
+    log, close = open_structured_logger(str(p), trace_id="fixed-t", session_id="fixed-s")
+    try:
+        log.emit("y")
+    finally:
+        close()
+    d = json.loads(p.read_text(encoding="utf-8").strip())
+    assert d["trace_id"] == "fixed-t"
+    assert d["session_id"] == "fixed-s"
+
+
 def test_codegen_config_redacted_summary_structured_log() -> None:
     c = CodegenConfig(structured_log="stderr", openai_api_key="x")
     s = c.redacted_summary()
