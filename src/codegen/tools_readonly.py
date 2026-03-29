@@ -1,4 +1,4 @@
-"""Read-only workspace tools: schemas + execution (P0-E3)."""
+"""Workspace tools: read-only (P0-E3) + apply_patch (P1-01)."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
 from codegen.workspace_paths import (
     PathOutsideWorkspaceError,
     resolved_path_is_under_workspace,
@@ -101,6 +102,8 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
         },
     },
 ]
+
+TOOL_DEFINITIONS.append(APPLY_PATCH_TOOL_DEFINITION)
 
 _DEFAULT_READ_LINES = 500
 _DEFAULT_READ_MAX_BYTES = 262_144  # 256 KiB
@@ -307,4 +310,6 @@ def execute_tool(workspace: Path, name: str, arguments_json: str) -> str:
         return _list_dir(workspace, args)
     if name == "grep":
         return _grep(workspace, args)
+    if name == "apply_patch":
+        return apply_patch(workspace, args)
     return _tool_error("UNKNOWN_TOOL", f"Unknown tool: {name}")

@@ -58,6 +58,12 @@ def test_invalid_field(tmp_path: Path) -> None:
         load_config(workspace=tmp_path)
 
 
+def test_base_url_requires_scheme(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_BASE_URL", "api.openai.com/v1")
+    with pytest.raises(CodegenConfigError, match="base_url|https"):
+        load_config(workspace=tmp_path)
+
+
 def test_explicit_config_path(tmp_path: Path) -> None:
     other = tmp_path / "other.toml"
     other.write_text('model = "x"\n', encoding="utf-8")

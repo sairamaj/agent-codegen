@@ -4,6 +4,23 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
+## 2026-03-29 — Epic P1-E1: Patches and edits
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P1-01 | Done | **`apply_patch`** tool: structured `files[]` with `hunks` (`old_text` / `new_text`), workspace checks via `resolve_under_workspace`, per-file JSON results with `sha256` / errors; wired in `tools_readonly.execute_tool`; CLI system prompt mentions it. Module: `codegen.tools_patch`. |
+| P1-02 | Done | **`HUNK_MISMATCH`** / **`AMBIGUOUS_MATCH`**: `hunk_index`, `line_count`, line/column hints, `context_preview`, `read_file` hints; multiline “first line matches” → `first_line_found_at`. Empty `old_text` rejected on existing files. |
+| P1-03 | Done | **Partial multi-file** documented in [docs/codegen_requirements.md](docs/codegen_requirements.md) §4.5.1 and [AGENTS.md](AGENTS.md); not atomic across files; failures do not skip later files; `partial` / `ok` semantics; tests in `test_tools_patch.py`. |
+
+**Code / tests**
+
+- `codegen.tools_patch`, `codegen.tools_readonly` (tool def + dispatch), `tests/test_tools_patch.py`.
+- **UX / connectivity (same window):** clearer OpenAI connection/timeout messages; `codegen.http_env` validates `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` must use a full URL; `OPENAI_BASE_URL` must include `http://` or `https://` when set (`codegen.config`).
+
+---
+
 ## 2026-03-29 — Epic P0-E4: Colored console UX
 
 **Stories**

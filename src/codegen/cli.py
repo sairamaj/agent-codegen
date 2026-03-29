@@ -161,7 +161,8 @@ def _build_system_prompt(workspace_display: str, project_rules: str | None) -> s
     parts = [
         "You are Codegen, a workspace-scoped coding assistant.",
         f"Workspace root: {workspace_display}",
-        "You have read-only tools: read_file, list_dir, grep. Paths are relative to the workspace.",
+        "You have tools: read_file, list_dir, grep, apply_patch (structured edits). "
+        "Paths are relative to the workspace.",
         "Prefer tools over guessing file contents.",
     ]
     if project_rules:

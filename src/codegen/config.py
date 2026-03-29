@@ -24,7 +24,7 @@ class CodegenConfig(BaseModel):
 
     Documented environment variables:
     - OPENAI_API_KEY — API secret (never printed by the CLI).
-    - OPENAI_BASE_URL — optional API base URL.
+    - OPENAI_BASE_URL — optional API base URL (must include ``https://`` or ``http://``).
     - OPENAI_MODEL — optional model name override.
     - CODEGEN_CONFIG — path to TOML config file when --config is not passed.
     - CODEGEN_STRUCTURED_LOG — optional JSONL log target: ``stderr``, ``-``, or a file path.
@@ -49,11 +49,17 @@ class CodegenConfig(BaseModel):
 
     @field_validator("base_url")
     @classmethod
-    def strip_base_url(cls, v: str | None) -> str | None:
+    def validate_base_url(cls, v: str | None) -> str | None:
         if v is None:
             return None
         s = v.strip()
-        return s or None
+        if not s:
+            return None
+        if not s.startswith(("http://", "https://")):
+            raise ValueError(
+                "base_url must start with http:// or https:// (e.g. https://api.openai.com/v1)"
+            )
+        return s
 
     def redacted_summary(self) -> dict[str, Any]:
         """Safe dict for logging / `codegen info` (no secrets)."""

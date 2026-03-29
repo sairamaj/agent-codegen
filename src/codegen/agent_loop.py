@@ -7,11 +7,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from openai import APIError, OpenAI
+import httpx
+from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from rich.console import Console
 
 from codegen.config import CodegenConfig
+from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
 from codegen.observability import StructuredLogger, sanitize_args_for_log, tool_result_outcome
 from codegen.tools_readonly import TOOL_DEFINITIONS, execute_tool
@@ -40,6 +42,62 @@ class AgentRunResult:
 def _http_timeout_seconds(cfg: CodegenConfig) -> float:
     """Bound a single HTTP call; keep below task wall clock."""
     return float(min(120, max(30, cfg.max_wall_clock_seconds)))
+
+
+def _api_error_stop_reason(exc: APIError) -> str:
+    if isinstance(exc, APITimeoutError):
+        return "api_timeout"
+    if isinstance(exc, APIConnectionError):
+        return "api_connection"
+    return "api_error"
+
+
+def _exception_chain_contains_unsupported_protocol(root: BaseException) -> bool:
+    cur: BaseException | None = root
+    while cur is not None:
+        if isinstance(cur, httpx.UnsupportedProtocol):
+            return True
+        cur = cur.__cause__
+    return False
+
+
+def _print_openai_api_error(console: Console, exc: APIError, *, config: CodegenConfig) -> None:
+    """User-visible detail for API failures (connection issues are often opaque as 'Connection error.')."""
+    console.print()
+    if isinstance(exc, APITimeoutError):
+        console.print("[error]OpenAI request timed out before a response was received.[/error]")
+        console.print(
+            "[muted]Try again, check network latency, or raise the client timeout "
+            f"(currently {_http_timeout_seconds(config):.0f}s, derived from max_wall_clock_seconds).[/muted]"
+        )
+        return
+    if isinstance(exc, APIConnectionError):
+        console.print("[error]Could not reach the OpenAI API (connection failed).[/error]")
+        base = (config.base_url or "").strip() or "https://api.openai.com/v1 (default)"
+        console.print(f"[muted]Effective base URL:[/muted] {base}")
+        cause = exc.__cause__
+        if cause is not None:
+            console.print(f"[muted]Underlying error:[/muted] {cause!r}")
+        bad_proto = _exception_chain_contains_unsupported_protocol(exc)
+        if bad_proto:
+            console.print(
+                "[muted]This often means HTTPS_PROXY, HTTP_PROXY, or ALL_PROXY is set to a host:port "
+                "without a scheme. Use a full URL, e.g. [bold]http://127.0.0.1:7890[/bold]. "
+                "Or unset those variables if you do not need a proxy.[/muted]"
+            )
+            console.print(
+                "[muted]OPENAI_BASE_URL must also include https:// or http:// if you set it.[/muted]"
+            )
+        msg = str(exc).strip()
+        if msg and msg.lower() not in ("connection error.", "connection error"):
+            console.print(f"[muted]Detail:[/muted] {msg}")
+        if not bad_proto:
+            console.print(
+                "[muted]Check: outbound HTTPS allowed; VPN/firewall/proxy; OPENAI_BASE_URL typo; "
+                "set HTTPS_PROXY/HTTP_PROXY to a full URL if your network requires a proxy.[/muted]"
+            )
+        return
+    console.print(f"[error]OpenAI API error: {exc}[/error]")
 
 
 def _merge_tool_delta(
@@ -85,6 +143,11 @@ def run_agent_task(
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
         return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="missing_api_key")
+
+    proxy_err = proxy_environment_error_message()
+    if proxy_err is not None:
+        console.print(f"[error]{proxy_err}[/error]")
+        return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="invalid_proxy_env")
 
     def _finish(
         exit_code: int,
@@ -171,26 +234,29 @@ def run_agent_task(
                     parallel_tool_calls=True,
                 )
             except APIError as e:
-                console.print()
-                console.print(f"[error]OpenAI API error: {e}[/error]")
-                return _finish(1, "api_error", iterations_used=iterations)
+                _print_openai_api_error(console, e, config=config)
+                return _finish(1, _api_error_stop_reason(e), iterations_used=iterations)
 
             assistant_content_parts: list[str] = []
-            for chunk in stream:
-                if time.monotonic() >= deadline:
-                    console.print()
-                    console.print("[warn]Stopped: max wall-clock time exceeded during streaming.[/warn]")
-                    return _finish(1, "max_wall_clock", iterations_used=iterations)
-                if not chunk.choices:
-                    continue
-                choice = chunk.choices[0]
-                if choice.finish_reason:
-                    finish_reason = choice.finish_reason
-                delta = choice.delta
-                if delta.content:
-                    assistant_content_parts.append(delta.content)
-                    console.print(delta.content, end="", style="assistant")
-                _merge_tool_delta(tool_calls_by_index, delta.tool_calls)
+            try:
+                for chunk in stream:
+                    if time.monotonic() >= deadline:
+                        console.print()
+                        console.print("[warn]Stopped: max wall-clock time exceeded during streaming.[/warn]")
+                        return _finish(1, "max_wall_clock", iterations_used=iterations)
+                    if not chunk.choices:
+                        continue
+                    choice = chunk.choices[0]
+                    if choice.finish_reason:
+                        finish_reason = choice.finish_reason
+                    delta = choice.delta
+                    if delta.content:
+                        assistant_content_parts.append(delta.content)
+                        console.print(delta.content, end="", style="assistant")
+                    _merge_tool_delta(tool_calls_by_index, delta.tool_calls)
+            except APIError as e:
+                _print_openai_api_error(console, e, config=config)
+                return _finish(1, _api_error_stop_reason(e), iterations_used=iterations)
 
             if assistant_content_parts:
                 console.print()

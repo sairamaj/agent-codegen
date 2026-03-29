@@ -25,6 +25,7 @@ When adding features, **trace changes** to requirement IDs where possible. When 
 | **Console UX** | **Colorized TTY** output in the spirit of Claude Code / modern CLI agents; respect `NO_COLOR` and non-TTY (no ANSI). |
 | **Learning goal** | Prefer **transparent code** over heavy frameworks: implement the agent loop with the **OpenAI SDK** and an **explicit** message ↔ tool-call ↔ execute ↔ repeat cycle. **Do not** introduce LangGraph/LangChain as the default stack unless the user explicitly asks or a story requires it (e.g. advanced persistence later). |
 | **Platform** | Windows, macOS, and Linux must remain workable (paths, subprocess, line endings per requirements). |
+| **`apply_patch` (multi-file)** | **Not** atomic across files: entries in `files` run in order; a failure on one file does **not** stop later files; each file is read → hunks in memory → one write. See [docs/codegen_requirements.md](docs/codegen_requirements.md) §4.5.1. |
 
 ## Implementation stance (for agents writing code)
 
@@ -56,4 +57,4 @@ Details and story IDs: `docs/codegen_stories.md`.
 
 ---
 
-*Last updated: 2026-03-28 — P0-E1 CLI bootstrap; `src/codegen` layout.*
+*Last updated: 2026-03-29 — §4.5.1 `apply_patch` partial multi-file semantics.*

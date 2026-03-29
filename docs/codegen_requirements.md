@@ -1,6 +1,6 @@
 # Codegen Agent — Requirements Specification
 
-**Version:** 1.0  
+**Version:** 1.1  
 **Status:** Draft for implementation  
 **Audience:** Product, engineering, security, and platform owners  
 
@@ -137,6 +137,18 @@ Requirements are **numbered** for traceability. “Must” indicates mandatory f
 | FR-EDIT-3 | The system **must** define **newline** and **encoding** policy (e.g. preserve existing; normalize on request). | 1 |
 | FR-EDIT-4 | On **hunk mismatch**, the system **must** return a clear error; **should** offer re-read of current file content for retry. | 1 |
 | FR-EDIT-5 | **Multi-file atomic apply** is **desirable**; if not supported, the system **must** document **partial apply** behavior and leave workspace consistent (e.g. transaction per file with rollback best-effort). | 1 |
+
+#### 4.5.1 `apply_patch` — multi-file partial apply (this CLI)
+
+The following is the **documented behavior** of the `apply_patch` tool in this repository (FR-EDIT-5, story P1-03). It is **not** a multi-file atomic transaction.
+
+| Behavior | Description |
+|----------|-------------|
+| **Across files** | There is **no** all-or-nothing apply: some paths in `files` may succeed and others fail in the same call. |
+| **Order** | The `files` array is processed **in order** (index 0, then 1, …). |
+| **After a failure** | Processing **does not stop**: if file *i* fails, file *i+1* is still attempted. |
+| **Per file** | For each path, the tool reads the current content (or starts empty for create), applies hunks **in memory**, then performs **one write**. If hunks fail for that path, **that file is left unchanged on disk** (no partial write of half-applied hunks). |
+| **Result JSON** | `files` mirrors the **input order**. Each entry has `ok` plus success fields or `error`. Top-level `ok` is `true` only if **all** entries succeeded. If any entry failed, top-level `ok` is `false`. The field `partial` is included when there was any failure: it is `true` if **at least one** entry succeeded and **at least one** failed; `false` if **every** entry failed. If **all** entries succeeded, `partial` is **omitted**. |
 
 ### 4.6 Verification (FR-Verify)
 
@@ -344,3 +356,4 @@ Resolve before or during implementation; document outcomes in ADRs or this spec�
 | Version | Date | Notes |
 |---------|------|--------|
 | 1.0 | 2026-03-28 | Initial specification from codegen agent plan. |
+| 1.1 | 2026-03-29 | §4.5.1: `apply_patch` multi-file partial apply semantics (FR-EDIT-5 / P1-03). |
