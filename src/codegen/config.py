@@ -27,6 +27,7 @@ class CodegenConfig(BaseModel):
     - OPENAI_BASE_URL — optional API base URL.
     - OPENAI_MODEL — optional model name override.
     - CODEGEN_CONFIG — path to TOML config file when --config is not passed.
+    - CODEGEN_STRUCTURED_LOG — optional JSONL log target: ``stderr``, ``-``, or a file path.
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -40,6 +41,10 @@ class CodegenConfig(BaseModel):
     openai_api_key: str | None = Field(
         default=None,
         description="Set via OPENAI_API_KEY only; kept for downstream client use.",
+    )
+    structured_log: str | None = Field(
+        default=None,
+        description='JSONL structured logs: unset = off, "stderr", or a file path.',
     )
 
     @field_validator("base_url")
@@ -59,7 +64,19 @@ class CodegenConfig(BaseModel):
             "max_wall_clock_seconds": self.max_wall_clock_seconds,
             "agents_md": self.agents_md,
             "openai_api_key_set": bool(self.openai_api_key),
+            "structured_log": self._structured_log_public(),
         }
+
+    def _structured_log_public(self) -> str | None:
+        """Where structured logs go, without expanding paths beyond basename for files."""
+        from codegen.observability import normalize_structured_log_destination
+
+        n = normalize_structured_log_destination(self.structured_log)
+        if n is None:
+            return None
+        if n == "stderr":
+            return "stderr"
+        return f"file:{Path(n).name}"
 
 
 def _read_toml_file(path: Path) -> dict[str, Any]:
@@ -149,7 +166,8 @@ def load_config(
     ``bootstrap`` loads a ``.env`` (see ``_find_dotenv_path``) before this;
     existing process env vars still win over ``.env`` entries.
 
-    TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md.
+    TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md,
+    structured_log (``stderr``, a path, or omit).
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -176,6 +194,8 @@ def load_config(
 
     if (p := os.environ.get("CODEGEN_AGENTS_MD", "").strip()):
         merged["agents_md"] = p
+    if (sl := os.environ.get("CODEGEN_STRUCTURED_LOG", "").strip()):
+        merged["structured_log"] = sl
 
     try:
         return CodegenConfig.model_validate(merged)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from collections.abc import Callable
 from typing import Annotated, Any, Optional
 
 import typer
@@ -12,6 +13,7 @@ from codegen.agent_loop import run_agent_task
 from codegen.bootstrap import bootstrap
 from codegen.config import CodegenConfigError
 from codegen.console import make_console
+from codegen.observability import normalize_structured_log_destination, open_structured_logger
 from codegen.workspace import WorkspaceError
 
 app = typer.Typer(
@@ -25,7 +27,8 @@ app = typer.Typer(
         "optional .env under workspace or a parent dir (loaded before env merge). "
         "Keys: model, base_url, max_iterations, max_wall_clock_seconds, agents_md. "
         "Environment: OPENAI_API_KEY (secret, never printed), OPENAI_BASE_URL, OPENAI_MODEL, "
-        "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG."
+        "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG, "
+        "CODEGEN_STRUCTURED_LOG."
     ),
 )
 
@@ -142,6 +145,8 @@ def info_cmd(
         console.print(summary["agents_md"])
         console.print("[muted]OPENAI_API_KEY:[/muted] ", end="")
         console.print("set" if summary["openai_api_key_set"] else "not set")
+        console.print("[muted]structured_log:[/muted] ", end="")
+        console.print(summary["structured_log"] or "(off)")
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -211,13 +216,23 @@ def run_cmd(
         raise typer.Exit(2) from e
 
     system = _build_system_prompt(str(result.workspace), result.project_rules_text)
-    out = run_agent_task(
-        workspace=result.workspace,
-        config=result.config,
-        system_prompt=system,
-        user_message=task,
-        console=console,
-    )
+    log_dest = normalize_structured_log_destination(result.config.structured_log)
+    close_log: Callable[[], None] | None = None
+    structured_logger = None
+    if log_dest:
+        structured_logger, close_log = open_structured_logger(log_dest)
+    try:
+        out = run_agent_task(
+            workspace=result.workspace,
+            config=result.config,
+            system_prompt=system,
+            user_message=task,
+            console=console,
+            structured_logger=structured_logger,
+        )
+    finally:
+        if close_log is not None:
+            close_log()
     raise typer.Exit(out.exit_code)
 
 

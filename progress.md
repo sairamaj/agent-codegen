@@ -59,9 +59,21 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
-## Not started yet (Phase 0 remainder)
+## 2026-03-29 — Epic P0-E5: Observability (minimal)
 
-- **P0-E5** — Structured logging / trace IDs (P0-16).
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P0-16 | Done | Optional **JSON lines** to **stderr** or a **file** (`structured_log` in TOML / `CODEGEN_STRUCTURED_LOG`). Each line includes **`trace_id`** and **`session_id`** (same UUID for a single `run`). Events: `run.start`, `model.iteration`, `tool.start` (sanitized args), `tool.complete` (duration_ms, outcome / error_code), `run.end`. |
+
+**Code / tests**
+
+- `codegen.observability`: `StructuredLogger`, `open_structured_logger`, `normalize_structured_log_destination`, `sanitize_args_for_log`, `tool_result_outcome`.
+- `codegen.config`: `structured_log`; `redacted_summary` shows `stderr` or `file:<basename>`.
+- `codegen.agent_loop`: optional `structured_logger` on `run_agent_task`.
+- `codegen.cli` `run`: opens sink; `info` shows `structured_log`.
+- `tests/test_observability.py`.
 
 ---
 

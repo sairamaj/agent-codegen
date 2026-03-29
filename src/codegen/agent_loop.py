@@ -12,7 +12,8 @@ from openai.types.chat import ChatCompletionMessageParam
 from rich.console import Console
 
 from codegen.config import CodegenConfig
-from codegen.console import format_user_task_preview, redact_tool_args_display
+from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
+from codegen.observability import StructuredLogger, sanitize_args_for_log, tool_result_outcome
 from codegen.tools_readonly import TOOL_DEFINITIONS, execute_tool
 
 
@@ -73,6 +74,7 @@ def run_agent_task(
     user_message: str,
     console: Console,
     client: OpenAI | None = None,
+    structured_logger: StructuredLogger | None = None,
 ) -> AgentRunResult:
     """
     Run the model with read-only tools until a final assistant message or a limit.
@@ -83,6 +85,26 @@ def run_agent_task(
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
         return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="missing_api_key")
+
+    def _finish(
+        exit_code: int,
+        stop_reason: str,
+        *,
+        iterations_used: int,
+    ) -> AgentRunResult:
+        if structured_logger is not None:
+            structured_logger.emit(
+                "run.end",
+                exit_code=exit_code,
+                stop_reason=stop_reason,
+                iterations_used=iterations_used,
+            )
+        return AgentRunResult(
+            exit_code=exit_code,
+            iterations_used=iterations_used,
+            stop_reason=stop_reason,
+            tool_calls=all_records,
+        )
 
     console.print("[muted]user[/muted] ", end="")
     console.print(format_user_task_preview(user_message), style="user")
@@ -101,6 +123,17 @@ def run_agent_task(
         {"role": "user", "content": user_message},
     ]
 
+    if structured_logger is not None:
+        task_preview = redact_secrets_in_text(format_user_task_preview(user_message))
+        structured_logger.emit(
+            "run.start",
+            workspace=str(workspace),
+            model=config.model,
+            task_preview=task_preview,
+            max_iterations=config.max_iterations,
+            max_wall_clock_seconds=config.max_wall_clock_seconds,
+        )
+
     deadline = time.monotonic() + float(config.max_wall_clock_seconds)
     all_records: list[ToolCallRecord] = []
     iterations = 0
@@ -113,26 +146,18 @@ def run_agent_task(
                     "[warn]Stopped: max wall-clock time exceeded "
                     f"({config.max_wall_clock_seconds}s).[/warn]"
                 )
-                return AgentRunResult(
-                    exit_code=1,
-                    iterations_used=iterations,
-                    stop_reason="max_wall_clock",
-                    tool_calls=all_records,
-                )
+                return _finish(1, "max_wall_clock", iterations_used=iterations)
             if iterations >= config.max_iterations:
                 console.print()
                 console.print(
                     "[warn]Stopped: max iterations reached "
                     f"({config.max_iterations}).[/warn]"
                 )
-                return AgentRunResult(
-                    exit_code=1,
-                    iterations_used=iterations,
-                    stop_reason="max_iterations",
-                    tool_calls=all_records,
-                )
+                return _finish(1, "max_iterations", iterations_used=iterations)
 
             iterations += 1
+            if structured_logger is not None:
+                structured_logger.emit("model.iteration", iteration=iterations)
             tool_calls_by_index: dict[int, dict[str, Any]] = {}
             finish_reason: str | None = None
 
@@ -148,24 +173,14 @@ def run_agent_task(
             except APIError as e:
                 console.print()
                 console.print(f"[error]OpenAI API error: {e}[/error]")
-                return AgentRunResult(
-                    exit_code=1,
-                    iterations_used=iterations,
-                    stop_reason="api_error",
-                    tool_calls=all_records,
-                )
+                return _finish(1, "api_error", iterations_used=iterations)
 
             assistant_content_parts: list[str] = []
             for chunk in stream:
                 if time.monotonic() >= deadline:
                     console.print()
                     console.print("[warn]Stopped: max wall-clock time exceeded during streaming.[/warn]")
-                    return AgentRunResult(
-                        exit_code=1,
-                        iterations_used=iterations,
-                        stop_reason="max_wall_clock",
-                        tool_calls=all_records,
-                    )
+                    return _finish(1, "max_wall_clock", iterations_used=iterations)
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -200,7 +215,23 @@ def run_agent_task(
                     console.print("[tool]›[/tool] ", end="")
                     console.print(name, style="tool", end=" ")
                     console.print(arg_summary, style="muted")
+                    if structured_logger is not None:
+                        structured_logger.emit(
+                            "tool.start",
+                            tool_name=name,
+                            args_sanitized=sanitize_args_for_log(raw_args),
+                        )
+                    t_tool = time.monotonic()
                     result = execute_tool(workspace, name, raw_args)
+                    duration_ms = int((time.monotonic() - t_tool) * 1000)
+                    if structured_logger is not None:
+                        outcome = tool_result_outcome(result)
+                        structured_logger.emit(
+                            "tool.complete",
+                            tool_name=name,
+                            duration_ms=duration_ms,
+                            **outcome,
+                        )
                     all_records.append(ToolCallRecord(name=name, arguments=raw_args, result=result))
                     messages.append(
                         {
@@ -215,12 +246,7 @@ def run_agent_task(
             if assistant_text is not None:
                 # already printed while streaming
                 pass
-            return AgentRunResult(
-                exit_code=0,
-                iterations_used=iterations,
-                stop_reason=finish_reason or "stop",
-                tool_calls=all_records,
-            )
+            return _finish(0, finish_reason or "stop", iterations_used=iterations)
     finally:
         if own_client:
             client.close()
