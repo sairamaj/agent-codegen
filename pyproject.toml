@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codegen-agent"
+version = "0.1.0"
+description = "CLI coding agent (OpenAI, workspace tools, phased delivery)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Codegen contributors" }]
+dependencies = [
+  "typer>=0.12,<1",
+  "rich>=13.7,<14",
+  "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+codegen = "codegen.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codegen"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

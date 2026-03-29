@@ -1,0 +1,24 @@
+---
+description: Codegen CLI agent project context — docs, phases, OpenAI, learning-first loop
+alwaysApply: true
+---
+
+# Codegen workspace
+
+This repo builds a **CLI coding agent** (OpenAI, workspace tools, phased delivery).
+
+## Read first
+
+- **[AGENTS.md](AGENTS.md)** at the repo root — full decisions and conventions.
+- **[docs/codegen_requirements.md](docs/codegen_requirements.md)** — FR/NFR, architecture, phases.
+- **[docs/codegen_stories.md](docs/codegen_stories.md)** — backlog and story format.
+
+## Non-negotiables for implementation
+
+- **CLI only**; **OpenAI** for the model; **color console** (Claude-style), `NO_COLOR` / non-TTY safe.
+- Prefer **OpenAI SDK + explicit tool loop** so the code stays easy to learn and inspect. Do not default to LangGraph/LangChain unless the user or a story explicitly requires it.
+- Respect **workspace root** boundaries, **plan vs execute**, and **policy** for shell commands when those stories apply.
+
+## When editing stories or specs
+
+Keep **phase tags**, **acceptance criteria**, and **maps to** requirement IDs consistent with `codegen_requirements.md`.

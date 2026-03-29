@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.env
+
+# Node
+node_modules/
+dist/
+.DS_Store
+
+# Docker
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Postgres volume
+postgres_data/
+
+# Terraform
+.terraform/
+terraform.tfvars
+*.auto.tfvars
+
+# Terraform state
+*.tfstate
+*.tfstate.backup
+*.tfstate.*
+
+# Terraform binaries
+terraform.exe
+Terraform.exe
