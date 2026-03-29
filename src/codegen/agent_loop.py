@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -42,6 +43,8 @@ class AgentRunResult:
     iterations_used: int
     stop_reason: str
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+    #: Messages after the system prompt (user / assistant / tool), for multi-turn CLI sessions.
+    transcript_after_system: list[ChatCompletionMessageParam] = field(default_factory=list)
 
 
 def prompt_for_command_approval(console: Console, command: str) -> bool:
@@ -161,6 +164,7 @@ def run_agent_task(
     session_audit: SessionAuditWriter | None = None,
     agent_mode: Literal["plan", "execute"] = "execute",
     auto_approve: bool = False,
+    prior_messages: Sequence[ChatCompletionMessageParam] | None = None,
 ) -> AgentRunResult:
     """
     Run the model with tools until a final assistant message or a limit.
@@ -169,6 +173,9 @@ def run_agent_task(
     ``max_wall_clock_seconds`` (P0-06). Tool failures are JSON strings (P0-08).
     ``agent_mode=plan`` exposes only read-only tools (P1-06); ``execute`` adds patch + shell.
     Optional ``session_audit`` appends per-run NDJSON (P1-08) with ordered tool records.
+    Pass ``prior_messages`` (must not include the system message) to continue a conversation;
+    ``transcript_after_system`` on the result is the full suffix to pass as the next
+    ``prior_messages`` after a successful turn.
     """
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
@@ -204,6 +211,7 @@ def run_agent_task(
             iterations_used=iterations_used,
             stop_reason=stop_reason,
             tool_calls=all_records,
+            transcript_after_system=deepcopy(messages[1:]),
         )
 
     console.print("[muted]user[/muted] ", end="")
@@ -233,8 +241,10 @@ def run_agent_task(
             timeout=_http_timeout_seconds(config),
         )
 
+    prior = list(prior_messages) if prior_messages else []
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
+        *prior,
         {"role": "user", "content": user_message},
     ]
 
@@ -388,10 +398,8 @@ def run_agent_task(
                     )
                 continue
 
-            # Final assistant turn (or stop without tools)
-            if assistant_text is not None:
-                # already printed while streaming
-                pass
+            # Final assistant turn (or stop without tools) — keep in transcript for follow-up turns.
+            messages.append({"role": "assistant", "content": assistant_text})
             return _finish(0, finish_reason or "stop", iterations_used=iterations)
     finally:
         if own_client:

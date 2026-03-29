@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -111,6 +112,69 @@ def test_tool_round_trip_then_text(tmp_path: Path) -> None:
     assert out.iterations_used == 2
     assert len(out.tool_calls) == 1
     assert out.tool_calls[0].name == "list_dir"
+    tr = out.transcript_after_system
+    assert tr[0] == {"role": "user", "content": "list files"}
+    assert tr[-1]["role"] == "assistant"
+
+
+def test_prior_messages_second_turn_sent_to_api(tmp_path: Path) -> None:
+    """Interactive-style memory: prior transcript is prepended before the new user message."""
+    cfg = CodegenConfig(
+        model="gpt-4o-mini",
+        openai_api_key="sk-test",
+        max_iterations=5,
+        max_wall_clock_seconds=60,
+    )
+    client = MagicMock()
+    stream1 = _FakeStream(
+        [
+            _FakeChunk(_FakeDelta(content="Hi.")),
+            _FakeChunk(_FakeDelta(), finish_reason="stop"),
+        ]
+    )
+    stream2 = _FakeStream(
+        [
+            _FakeChunk(_FakeDelta(content="Ack.")),
+            _FakeChunk(_FakeDelta(), finish_reason="stop"),
+        ]
+    )
+    api_message_snapshots: list[Any] = []
+    stream_q = [stream1, stream2]
+
+    def _capture_create(**kwargs: Any) -> Any:
+        api_message_snapshots.append(deepcopy(kwargs["messages"]))
+        return stream_q.pop(0)
+
+    client.chat.completions.create.side_effect = _capture_create
+    console = make_console(force_color=False)
+    out1 = run_agent_task(
+        workspace=tmp_path,
+        config=cfg,
+        system_prompt="sys",
+        user_message="first",
+        console=console,
+        client=client,
+    )
+    assert out1.exit_code == 0
+    tr = out1.transcript_after_system
+    assert tr[0]["role"] == "user" and tr[0]["content"] == "first"
+    assert tr[-1]["role"] == "assistant"
+
+    out2 = run_agent_task(
+        workspace=tmp_path,
+        config=cfg,
+        system_prompt="sys",
+        user_message="second",
+        console=console,
+        client=client,
+        prior_messages=tr,
+    )
+    assert out2.exit_code == 0
+    assert len(api_message_snapshots) == 2
+    msgs = api_message_snapshots[1]
+    assert msgs[0] == {"role": "system", "content": "sys"}
+    assert msgs[1]["role"] == "user" and msgs[1]["content"] == "first"
+    assert msgs[-1] == {"role": "user", "content": "second"}
 
 
 def test_session_audit_ordered_tool_records(tmp_path: Path) -> None:

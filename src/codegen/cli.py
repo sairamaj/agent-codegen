@@ -8,6 +8,7 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal, Optional
 
 import typer
+from openai.types.chat import ChatCompletionMessageParam
 
 from codegen import __version__
 from codegen.agent_loop import AgentRunResult, run_agent_task
@@ -305,8 +306,11 @@ def run_cmd(
             audit_path, trace_id=trace_id, session_id=session_id
         )
 
+    history: list[ChatCompletionMessageParam] = []
+
     def _run_one(user_message: str) -> AgentRunResult:
-        return run_agent_task(
+        nonlocal history
+        out = run_agent_task(
             workspace=result.workspace,
             config=result.config,
             system_prompt=system,
@@ -316,7 +320,11 @@ def run_cmd(
             session_audit=session_audit_writer,
             agent_mode=agent_mode,
             auto_approve=auto_approve,
+            prior_messages=history if history else None,
         )
+        if interactive and out.exit_code == 0 and out.transcript_after_system:
+            history = list(out.transcript_after_system)
+        return out
 
     try:
         if not interactive:
@@ -330,7 +338,8 @@ def run_cmd(
             raise typer.Exit(2)
 
         console.print(
-            "[muted]Interactive mode — enter tasks (or exit, quit, :q, or Ctrl+Z then Enter on Windows / Ctrl+D on Unix). "
+            "[muted]Interactive mode — each successful turn keeps conversation context for follow-ups. "
+            "Enter tasks (or exit, quit, :q, or Ctrl+Z then Enter on Windows / Ctrl+D on Unix). "
             "Empty lines are skipped.[/muted]",
         )
         console.print()
