@@ -1,21 +1,25 @@
-"""Workspace tools: read-only (P0-E3) + apply_patch (P1-01)."""
+"""Workspace tools: read-only (P0-E3) + apply_patch (P1-01) + run_terminal_cmd (P1-E2)."""
 
 from __future__ import annotations
 
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from codegen.command_policy import CommandPolicy, command_policy_from_config
+from codegen.config import CodegenConfig
 from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
+from codegen.tools_terminal import RUN_TERMINAL_CMD_TOOL_DEFINITION, run_terminal_cmd
+from codegen.tool_dispatch import ToolDispatchContext
 from codegen.workspace_paths import (
     PathOutsideWorkspaceError,
     resolved_path_is_under_workspace,
     resolve_under_workspace,
 )
 
-# OpenAI Chat Completions `tools=[{"type":"function","function":{...}}]` entries.
-TOOL_DEFINITIONS: list[dict[str, Any]] = [
+# OpenAI Chat Completions `tools=[{"type":"function","function":{...}}]` entries (read-only).
+_READONLY_TOOL_DEFINITIONS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
@@ -103,7 +107,18 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
 ]
 
-TOOL_DEFINITIONS.append(APPLY_PATCH_TOOL_DEFINITION)
+
+def tool_definitions_for_mode(mode: Literal["plan", "execute"]) -> list[dict[str, Any]]:
+    """Plan mode exposes only read-only tools; execute adds patch + shell."""
+    defs = list(_READONLY_TOOL_DEFINITIONS)
+    if mode == "execute":
+        defs.append(APPLY_PATCH_TOOL_DEFINITION)
+        defs.append(RUN_TERMINAL_CMD_TOOL_DEFINITION)
+    return defs
+
+
+# Backward compatibility: full toolset (execute mode).
+TOOL_DEFINITIONS: list[dict[str, Any]] = tool_definitions_for_mode("execute")
 
 _DEFAULT_READ_LINES = 500
 _DEFAULT_READ_MAX_BYTES = 262_144  # 256 KiB
@@ -296,14 +311,34 @@ def _grep(workspace: Path, args: dict[str, Any]) -> str:
     return out
 
 
-def execute_tool(workspace: Path, name: str, arguments_json: str) -> str:
+def _permissive_shell_policy() -> CommandPolicy:
+    """Tests / callers that omit dispatch: shell allowed without deny/approval rules."""
+    return CommandPolicy(allowlist=(), denylist=(), require_approval=())
+
+
+def execute_tool(
+    workspace: Path,
+    name: str,
+    arguments_json: str,
+    *,
+    dispatch: ToolDispatchContext | None = None,
+    config: CodegenConfig | None = None,
+) -> str:
     """Run a tool by name; always returns a string (JSON object) for the model."""
+    ctx = dispatch or ToolDispatchContext()
     try:
         args = json.loads(arguments_json or "{}")
         if not isinstance(args, dict):
             return _tool_error("INVALID_ARGUMENT", "Tool arguments must be a JSON object")
     except json.JSONDecodeError as e:
         return _tool_error("INVALID_JSON", f"Invalid tool arguments JSON: {e}")
+
+    if ctx.agent_mode == "plan" and name in ("apply_patch", "run_terminal_cmd"):
+        return _tool_error(
+            "PLAN_MODE",
+            "This tool is disabled in plan mode (read-only). Use execute mode to apply patches or run shell.",
+        )
+
     if name == "read_file":
         return _read_file(workspace, args)
     if name == "list_dir":
@@ -312,4 +347,23 @@ def execute_tool(workspace: Path, name: str, arguments_json: str) -> str:
         return _grep(workspace, args)
     if name == "apply_patch":
         return apply_patch(workspace, args)
+    if name == "run_terminal_cmd":
+        if ctx.policy is not None:
+            pol = ctx.policy
+        elif config is not None:
+            pol = command_policy_from_config(config)
+        else:
+            pol = _permissive_shell_policy()
+        timeout = config.shell_timeout_seconds if config is not None else 120
+        max_out = config.shell_max_output_bytes if config is not None else 32_768
+        return run_terminal_cmd(
+            workspace,
+            args,
+            policy=pol,
+            timeout_seconds=timeout,
+            max_output_bytes=max_out,
+            approval_callback=ctx.approval_callback,
+            console=ctx.console,
+            structured_logger=ctx.structured_logger,
+        )
     return _tool_error("UNKNOWN_TOOL", f"Unknown tool: {name}")

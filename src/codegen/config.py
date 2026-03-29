@@ -11,6 +11,10 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
+def _split_csv_list(raw: str) -> list[str]:
+    return [p.strip() for p in raw.split(",") if p.strip()]
+
+
 class CodegenConfigError(Exception):
     """Invalid configuration file or merged settings."""
 
@@ -28,6 +32,10 @@ class CodegenConfig(BaseModel):
     - OPENAI_MODEL — optional model name override.
     - CODEGEN_CONFIG — path to TOML config file when --config is not passed.
     - CODEGEN_STRUCTURED_LOG — optional JSONL log target: ``stderr``, ``-``, or a file path.
+    - CODEGEN_COMMAND_ALLOWLIST — comma-separated fnmatch patterns (optional).
+    - CODEGEN_COMMAND_DENYLIST — comma-separated patterns; set to empty string ``""`` for no deny rules.
+    - CODEGEN_COMMAND_REQUIRE_APPROVAL — comma-separated patterns; empty string for none.
+    - CODEGEN_SHELL_TIMEOUT_SECONDS / CODEGEN_SHELL_MAX_OUTPUT_BYTES — integers.
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -46,6 +54,21 @@ class CodegenConfig(BaseModel):
         default=None,
         description='JSONL structured logs: unset = off, "stderr", or a file path.',
     )
+    # P1-E2: shell policy (None = use built-in defaults for deny/require_approval)
+    command_allowlist: list[str] = Field(
+        default_factory=list,
+        description="If non-empty, shell commands must match at least one fnmatch pattern.",
+    )
+    command_denylist: list[str] | None = Field(
+        default=None,
+        description="fnmatch patterns for blocked commands; None uses built-in defaults.",
+    )
+    command_require_approval: list[str] | None = Field(
+        default=None,
+        description="fnmatch patterns requiring user approval; None uses built-in defaults.",
+    )
+    shell_timeout_seconds: int = Field(default=120, ge=1, le=86_400)
+    shell_max_output_bytes: int = Field(default=32_768, ge=1024, le=2_000_000)
 
     @field_validator("base_url")
     @classmethod
@@ -71,6 +94,13 @@ class CodegenConfig(BaseModel):
             "agents_md": self.agents_md,
             "openai_api_key_set": bool(self.openai_api_key),
             "structured_log": self._structured_log_public(),
+            "command_allowlist": list(self.command_allowlist),
+            "command_denylist": "default" if self.command_denylist is None else list(self.command_denylist),
+            "command_require_approval": (
+                "default" if self.command_require_approval is None else list(self.command_require_approval)
+            ),
+            "shell_timeout_seconds": self.shell_timeout_seconds,
+            "shell_max_output_bytes": self.shell_max_output_bytes,
         }
 
     def _structured_log_public(self) -> str | None:
@@ -173,7 +203,8 @@ def load_config(
     existing process env vars still win over ``.env`` entries.
 
     TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md,
-    structured_log (``stderr``, a path, or omit).
+    structured_log (``stderr``, a path, or omit), command_allowlist, command_denylist,
+    command_require_approval, shell_timeout_seconds, shell_max_output_bytes.
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -202,6 +233,26 @@ def load_config(
         merged["agents_md"] = p
     if (sl := os.environ.get("CODEGEN_STRUCTURED_LOG", "").strip()):
         merged["structured_log"] = sl
+
+    if (raw := os.environ.get("CODEGEN_COMMAND_ALLOWLIST", "").strip()):
+        merged["command_allowlist"] = _split_csv_list(raw)
+    if os.environ.get("CODEGEN_COMMAND_DENYLIST") is not None:
+        raw = os.environ.get("CODEGEN_COMMAND_DENYLIST", "").strip()
+        merged["command_denylist"] = _split_csv_list(raw) if raw else []
+    if os.environ.get("CODEGEN_COMMAND_REQUIRE_APPROVAL") is not None:
+        raw = os.environ.get("CODEGEN_COMMAND_REQUIRE_APPROVAL", "").strip()
+        merged["command_require_approval"] = _split_csv_list(raw) if raw else []
+
+    for key, env_key in (
+        ("shell_timeout_seconds", "CODEGEN_SHELL_TIMEOUT_SECONDS"),
+        ("shell_max_output_bytes", "CODEGEN_SHELL_MAX_OUTPUT_BYTES"),
+    ):
+        raw = os.environ.get(env_key, "").strip()
+        if raw:
+            try:
+                merged[key] = int(raw)
+            except ValueError as e:
+                raise CodegenConfigError(f"{env_key} must be an integer, got {raw!r}") from e
 
     try:
         return CodegenConfig.model_validate(merged)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from collections.abc import Callable
-from typing import Annotated, Any, Optional
+from typing import Annotated, Any, Literal, Optional
 
 import typer
 
@@ -23,12 +23,15 @@ app = typer.Typer(
     help=(
         "Workspace-scoped coding agent. Use ``codegen -w DIR run TASK`` or "
         "``codegen run TASK -w DIR`` (same for ``info``).\n\n"
+        "Run-only flags (``--mode plan|execute``, ``--yes``, …) are on the ``run`` subcommand — "
+        "use ``codegen run --help`` to list them; they do not appear on this top-level help.\n\n"
         "Config: TOML file via --config, CODEGEN_CONFIG, or <workspace>/codegen.toml; "
         "optional .env under workspace or a parent dir (loaded before env merge). "
         "Keys: model, base_url, max_iterations, max_wall_clock_seconds, agents_md. "
         "Environment: OPENAI_API_KEY (secret, never printed), OPENAI_BASE_URL, OPENAI_MODEL, "
         "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG, "
-        "CODEGEN_STRUCTURED_LOG."
+        "CODEGEN_STRUCTURED_LOG, CODEGEN_COMMAND_ALLOWLIST, CODEGEN_COMMAND_DENYLIST, "
+        "CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, CODEGEN_SHELL_MAX_OUTPUT_BYTES."
     ),
 )
 
@@ -77,7 +80,7 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Codegen CLI — Phase 0 read-only agent (see ``codegen run``)."""
+    """Codegen CLI — global options only; ``codegen run --help`` for ``--mode``, ``--yes``, etc."""
     ctx.obj = {
         "workspace": workspace,
         "config": config,
@@ -157,12 +160,21 @@ def info_cmd(
         console.print(f"loaded ({n} characters)")
 
 
-def _build_system_prompt(workspace_display: str, project_rules: str | None) -> str:
+def _build_system_prompt(
+    workspace_display: str,
+    project_rules: str | None,
+    *,
+    agent_mode: Literal["plan", "execute"] = "execute",
+) -> str:
+    tools_line = (
+        "You have tools: read_file, list_dir, grep, apply_patch (structured edits), run_terminal_cmd. "
+        if agent_mode == "execute"
+        else "You have read-only tools: read_file, list_dir, grep. "
+    )
     parts = [
         "You are Codegen, a workspace-scoped coding assistant.",
         f"Workspace root: {workspace_display}",
-        "You have tools: read_file, list_dir, grep, apply_patch (structured edits). "
-        "Paths are relative to the workspace.",
+        tools_line + "Paths are relative to the workspace.",
         "Prefer tools over guessing file contents.",
     ]
     if project_rules:
@@ -202,8 +214,22 @@ def run_cmd(
             help="Config file (overrides global ``-c`` when placed after ``run``).",
         ),
     ] = None,
+    mode: Annotated[
+        str,
+        typer.Option(
+            "--mode",
+            help="plan = read-only tools; execute = apply_patch + run_terminal_cmd (subject to policy).",
+        ),
+    ] = "execute",
+    auto_approve: Annotated[
+        bool,
+        typer.Option(
+            "--yes",
+            help="Auto-approve shell commands that would otherwise require a TTY prompt.",
+        ),
+    ] = False,
 ) -> None:
-    """Run the agent: OpenAI drives read-only tools; output is streamed."""
+    """Run the agent: OpenAI drives tools; output is streamed."""
     console = make_console()
     workspace_arg, config_arg = _merged_workspace_config(ctx, workspace, config)
 
@@ -216,7 +242,16 @@ def run_cmd(
         console.print(f"[error]{e}[/error]")
         raise typer.Exit(2) from e
 
-    system = _build_system_prompt(str(result.workspace), result.project_rules_text)
+    if mode not in ("plan", "execute"):
+        console.print(f"[error]Invalid --mode {mode!r}; use plan or execute.[/error]")
+        raise typer.Exit(2)
+    agent_mode: Literal["plan", "execute"] = "plan" if mode == "plan" else "execute"
+
+    system = _build_system_prompt(
+        str(result.workspace),
+        result.project_rules_text,
+        agent_mode=agent_mode,
+    )
     log_dest = normalize_structured_log_destination(result.config.structured_log)
     close_log: Callable[[], None] | None = None
     structured_logger = None
@@ -230,6 +265,8 @@ def run_cmd(
             user_message=task,
             console=console,
             structured_logger=structured_logger,
+            agent_mode=agent_mode,
+            auto_approve=auto_approve,
         )
     finally:
         if close_log is not None:

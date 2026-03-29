@@ -2,21 +2,25 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 from rich.console import Console
 
+from codegen.command_policy import command_policy_from_config
 from codegen.config import CodegenConfig
 from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
 from codegen.observability import StructuredLogger, sanitize_args_for_log, tool_result_outcome
-from codegen.tools_readonly import TOOL_DEFINITIONS, execute_tool
+from codegen.tool_dispatch import ToolDispatchContext
+from codegen.tools_readonly import execute_tool, tool_definitions_for_mode
 
 
 @dataclass(frozen=True)
@@ -37,6 +41,26 @@ class AgentRunResult:
     iterations_used: int
     stop_reason: str
     tool_calls: list[ToolCallRecord] = field(default_factory=list)
+
+
+def prompt_for_command_approval(console: Console, command: str) -> bool:
+    """TTY y/n gate for policy-approved sensitive commands (P1-07)."""
+    if not sys.stdin.isatty():
+        return False
+    console.print("[warn]This command requires approval:[/warn]")
+    console.print(f"  {command}", style="muted")
+    console.print("[muted]Allow? [y/N]:[/muted] ", end="")
+    try:
+        line = input().strip().lower()
+    except EOFError:
+        return False
+    return line in ("y", "yes")
+
+
+def _approval_callback_for_run(*, auto_approve: bool, console: Console) -> Callable[[str], bool]:
+    if auto_approve:
+        return lambda _cmd: True
+    return lambda cmd: prompt_for_command_approval(console, cmd)
 
 
 def _http_timeout_seconds(cfg: CodegenConfig) -> float:
@@ -133,12 +157,15 @@ def run_agent_task(
     console: Console,
     client: OpenAI | None = None,
     structured_logger: StructuredLogger | None = None,
+    agent_mode: Literal["plan", "execute"] = "execute",
+    auto_approve: bool = False,
 ) -> AgentRunResult:
     """
-    Run the model with read-only tools until a final assistant message or a limit.
+    Run the model with tools until a final assistant message or a limit.
 
     Streams assistant text to ``console`` (P0-07). Enforces ``max_iterations`` and
     ``max_wall_clock_seconds`` (P0-06). Tool failures are JSON strings (P0-08).
+    ``agent_mode=plan`` exposes only read-only tools (P1-06); ``execute`` adds patch + shell.
     """
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
@@ -172,6 +199,21 @@ def run_agent_task(
     console.print("[muted]user[/muted] ", end="")
     console.print(format_user_task_preview(user_message), style="user")
     console.print()
+    if agent_mode == "plan":
+        console.print(
+            "[warn]Mode: plan — read-only tools only (no apply_patch or run_terminal_cmd).[/warn]"
+        )
+        console.print()
+
+    tool_dispatch = ToolDispatchContext(
+        agent_mode=agent_mode,
+        policy=command_policy_from_config(config),
+        approval_callback=_approval_callback_for_run(auto_approve=auto_approve, console=console),
+        console=console,
+        structured_logger=structured_logger,
+    )
+
+    tools_for_run = tool_definitions_for_mode(agent_mode)
 
     own_client = client is None
     if client is None:
@@ -195,6 +237,8 @@ def run_agent_task(
             task_preview=task_preview,
             max_iterations=config.max_iterations,
             max_wall_clock_seconds=config.max_wall_clock_seconds,
+            agent_mode=agent_mode,
+            auto_approve_shell=auto_approve,
         )
 
     deadline = time.monotonic() + float(config.max_wall_clock_seconds)
@@ -228,7 +272,7 @@ def run_agent_task(
                 stream = client.chat.completions.create(
                     model=config.model,
                     messages=messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=tools_for_run,
                     tool_choice="auto",
                     stream=True,
                     parallel_tool_calls=True,
@@ -288,7 +332,13 @@ def run_agent_task(
                             args_sanitized=sanitize_args_for_log(raw_args),
                         )
                     t_tool = time.monotonic()
-                    result = execute_tool(workspace, name, raw_args)
+                    result = execute_tool(
+                        workspace,
+                        name,
+                        raw_args,
+                        dispatch=tool_dispatch,
+                        config=config,
+                    )
                     duration_ms = int((time.monotonic() - t_tool) * 1000)
                     if structured_logger is not None:
                         outcome = tool_result_outcome(result)

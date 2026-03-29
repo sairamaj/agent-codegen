@@ -4,6 +4,24 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
+## 2026-03-29 — Epic P1-E2: Terminal and policy
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P1-04 | Done | **`run_terminal_cmd`**: `command` + optional `cwd` (workspace-relative via `resolve_under_workspace`); `subprocess.run` with `shell=True`, `shell_timeout_seconds` / `shell_max_output_bytes` from config; stdout/stderr captured with truncation; `TIMEOUT` on limit. Tool def + impl: `codegen.tools_terminal`. |
+| P1-05 | Done | **Allow/deny/require_approval** via `CommandPolicy` + `command_policy_from_config` (fnmatch, case-normalized). `command_denylist` / `command_require_approval` `None` = built-in defaults; `[]` = explicit empty. Deny shown with `[error]` on console. |
+| P1-06 | Done | **`--mode plan`**: `tool_definitions_for_mode` exposes only read-only tools; `execute_tool` rejects `apply_patch` / `run_terminal_cmd` with `PLAN_MODE` if invoked. Banner + system prompt list tools by mode. |
+| P1-07 | Done | **TTY approval** for `require_approval` matches: `prompt_for_command_approval` + `--yes` / `auto_approve` to skip. Non-TTY denies approval. Structured log: `approval.request`, `approval.decision` (`approved`/`denied`). |
+
+**Code / tests**
+
+- `codegen.command_policy`, `codegen.tools_terminal`, `codegen.tool_dispatch`, `codegen.tools_readonly` (`tool_definitions_for_mode`, `execute_tool` dispatch), `codegen.agent_loop`, `codegen.config`, `codegen.cli` (`--mode`, `--yes`).
+- Tests: `tests/test_command_policy.py`, `tests/test_tools_terminal_policy.py` (includes X-03-style denied command never runs subprocess).
+
+---
+
 ## 2026-03-29 — Epic P1-E1: Patches and edits
 
 **Stories**
