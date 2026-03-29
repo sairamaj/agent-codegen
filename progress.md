@@ -4,6 +4,24 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
+## 2026-03-29 — Epic P0-E4: Colored console UX
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P0-13 | Done | Four semantic styles in `CODEGEN_THEME`: **user** (bold cyan), **assistant** (green), **tool** (magenta), **error** (bold red); **warn** / **muted** for limits and labels. User task echoed once at start of `run` (`user` + preview). |
+| P0-14 | Done | Colors off when stdout is not a TTY or `NO_COLOR` is set; `make_console(file=...)` forces plain output (tests / capture). |
+| P0-15 | Done | Before each tool run: `› name` + redacted, truncated arg summary (`redact_tool_args_display`: `sk-…`, `Bearer …`, JSON `api_key` / `token` / `password` / `secret` / `authorization`). |
+
+**Code / tests**
+
+- `codegen.console`: theme, `redact_secrets_in_text`, `format_user_task_preview`, `TOOL_ARGS_DISPLAY_MAX_LEN`.
+- `codegen.agent_loop`: user header line; tool lines use redacted summaries.
+- `tests/test_console.py`, extended `tests/test_agent_loop.py`.
+
+---
+
 ## 2026-03-29 — Epic P0-E2: OpenAI and agent loop
 
 **Stories**
@@ -43,7 +61,6 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ## Not started yet (Phase 0 remainder)
 
-- **P0-E4** — Colored console UX (four semantic styles, compact tool summaries, etc.).
 - **P0-E5** — Structured logging / trace IDs (P0-16).
 
 ---

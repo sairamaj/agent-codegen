@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -119,3 +120,54 @@ def test_missing_api_key(tmp_path: Path) -> None:
     )
     assert out.exit_code == 2
     assert out.stop_reason == "missing_api_key"
+
+
+def test_run_prints_user_line_and_redacts_tool_args(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("x", encoding="utf-8")
+    cfg = CodegenConfig(
+        model="gpt-4o-mini",
+        openai_api_key="sk-test",
+        max_iterations=5,
+        max_wall_clock_seconds=60,
+    )
+    client = MagicMock()
+    secret = "sk-123456789012345678901234567890"
+    stream1 = _FakeStream(
+        [
+            _FakeChunk(
+                _FakeDelta(
+                    tool_calls=[
+                        _FakeToolCallDelta(
+                            0,
+                            "call_1",
+                            "read_file",
+                            f'{{"path": "a.txt", "note": "{secret}"}}',
+                        )
+                    ]
+                ),
+                finish_reason="tool_calls",
+            ),
+        ]
+    )
+    stream2 = _FakeStream(
+        [
+            _FakeChunk(_FakeDelta(content="Ok."), finish_reason="stop"),
+        ]
+    )
+    client.chat.completions.create.side_effect = [stream1, stream2]
+
+    buf = io.StringIO()
+    console = make_console(file=buf)
+    task = "Do the thing"
+    run_agent_task(
+        workspace=tmp_path,
+        config=cfg,
+        system_prompt="test",
+        user_message=task,
+        console=console,
+        client=client,
+    )
+    text = buf.getvalue()
+    assert task in text
+    assert secret not in text
+    assert "read_file" in text

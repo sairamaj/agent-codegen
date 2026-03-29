@@ -12,6 +12,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from rich.console import Console
 
 from codegen.config import CodegenConfig
+from codegen.console import format_user_task_preview, redact_tool_args_display
 from codegen.tools_readonly import TOOL_DEFINITIONS, execute_tool
 
 
@@ -64,13 +65,6 @@ def _merge_tool_delta(
                 tool_calls_by_index[idx]["function"]["arguments"] += fn.arguments
 
 
-def _summarize_args(arguments: str, max_len: int = 200) -> str:
-    s = arguments.replace("\n", " ").strip()
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 1] + "…"
-
-
 def run_agent_task(
     *,
     workspace: Path,
@@ -89,6 +83,10 @@ def run_agent_task(
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
         return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="missing_api_key")
+
+    console.print("[muted]user[/muted] ", end="")
+    console.print(format_user_task_preview(user_message), style="user")
+    console.print()
 
     own_client = client is None
     if client is None:
@@ -198,10 +196,10 @@ def run_agent_task(
                     name = fn.get("name") or ""
                     raw_args = fn.get("arguments") or "{}"
                     tid = tc.get("id") or ""
-                    console.print(
-                        f"[tool]Tool[/tool] [muted]{name}[/muted] "
-                        f"{_summarize_args(raw_args)}"
-                    )
+                    arg_summary = redact_tool_args_display(raw_args)
+                    console.print("[tool]›[/tool] ", end="")
+                    console.print(name, style="tool", end=" ")
+                    console.print(arg_summary, style="muted")
                     result = execute_tool(workspace, name, raw_args)
                     all_records.append(ToolCallRecord(name=name, arguments=raw_args, result=result))
                     messages.append(
