@@ -60,3 +60,30 @@ def test_info_bad_workspace(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     r = _run("-w", str(missing), "info")
     assert r.returncode == 1
+
+
+def test_run_help() -> None:
+    r = _run("run", "--help")
+    assert r.returncode == 0
+    out = r.stdout + r.stderr
+    assert "run" in out.lower()
+    assert "--workspace" in out or "-w" in out
+
+
+def test_run_accepts_workspace_after_task(tmp_path: Path) -> None:
+    """``-w`` after ``run`` must be recognized (not a global-only option)."""
+    env = os.environ.copy()
+    env.pop("OPENAI_API_KEY", None)
+    prev = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = str(_SRC) + (os.pathsep + prev if prev else "")
+    r = subprocess.run(
+        [sys.executable, "-m", "codegen", "run", "hello", "-w", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    out = r.stdout + r.stderr
+    assert "No such option" not in out
+    assert r.returncode == 2
+    assert "OPENAI_API_KEY" in out or "not set" in out.lower()

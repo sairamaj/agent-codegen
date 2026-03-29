@@ -80,7 +80,10 @@ If you omit the subcommand, the CLI prints the same help as `--help` and exits s
 ## Configuration (optional)
 
 1. Optionally add **`codegen.toml`** or **`.codegen.toml`** in the **workspace** directory, or pass **`--config /path/to/file.toml`**.
-2. Set secrets via environment (never commit keys). The CLI does **not** print `OPENAI_API_KEY`.
+2. Optionally add **`.env`** in the **workspace** directory or a **parent** of it (same keys as environment variables below). The CLI walks up from the workspace path until it finds a `.env` file. Variables already set in your shell take precedence over `.env`.
+3. Set secrets via environment or `.env` (never commit keys). The CLI does **not** print `OPENAI_API_KEY`.
+
+See **`.env.example`** at the repo root for a template you can copy into a workspace as `.env`.
 
 **TOML keys (all optional):** `model`, `base_url`, `max_iterations`, `max_wall_clock_seconds`, `agents_md`
 

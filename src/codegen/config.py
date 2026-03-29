@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import tomllib
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
 
@@ -18,7 +19,8 @@ class CodegenConfig(BaseModel):
     """
     Merged configuration after file + environment.
 
-    Precedence (later wins): defaults < TOML file < environment variables.
+    Precedence (later wins): defaults < TOML file < discovered ``.env`` (via
+    ``load_workspace_dotenv``) < process environment variables.
 
     Documented environment variables:
     - OPENAI_API_KEY — API secret (never printed by the CLI).
@@ -82,6 +84,40 @@ def _find_default_config_file(workspace: Path) -> Path | None:
     return None
 
 
+def _find_dotenv_path(workspace: Path) -> Path | None:
+    """
+    Find ``.env`` starting at the workspace directory, walking up to the drive root.
+
+    Closest file to the workspace wins (``pkg/.env`` before ``repo/.env``).
+    """
+    cur = workspace.resolve()
+    for _ in range(256):
+        candidate = cur / ".env"
+        if candidate.is_file():
+            return candidate
+        parent = cur.parent
+        if parent == cur:
+            break
+        cur = parent
+    return None
+
+
+def load_workspace_dotenv(workspace: Path) -> None:
+    """
+    Load a discovered ``.env`` into the process environment if one exists.
+
+    The file is searched from ``workspace`` upward (so a ``.env`` in a parent
+    folder still applies when the workspace is a subdirectory). Does not
+    override variables already set in the environment. Uses UTF-8 with BOM
+    stripped (``utf-8-sig``) for Windows-friendly files.
+
+    Call before ``load_config`` so merged settings see these values.
+    """
+    path = _find_dotenv_path(workspace)
+    if path is not None:
+        load_dotenv(dotenv_path=path, override=False, encoding="utf-8-sig")
+
+
 def resolve_config_file_path(
     *,
     workspace: Path,
@@ -109,6 +145,9 @@ def load_config(
 ) -> CodegenConfig:
     """
     Load configuration from optional TOML plus environment overlays.
+
+    ``bootstrap`` loads a ``.env`` (see ``_find_dotenv_path``) before this;
+    existing process env vars still win over ``.env`` entries.
 
     TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md.
     """

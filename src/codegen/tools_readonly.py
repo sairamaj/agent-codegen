@@ -1,0 +1,281 @@
+"""Read-only workspace tools: schemas + execution (P0-E2 with P0-E3-shaped contracts)."""
+
+from __future__ import annotations
+
+import json
+import re
+from pathlib import Path
+from typing import Any
+
+from codegen.workspace_paths import PathOutsideWorkspaceError, resolve_under_workspace
+
+# OpenAI Chat Completions `tools=[{"type":"function","function":{...}}]` entries.
+TOOL_DEFINITIONS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": (
+                "Read a UTF-8 text file under the workspace. "
+                "Use offset/limit to read a slice of lines when the file is large."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Path relative to workspace root.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "0-based starting line index (optional).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of lines to return (optional).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_dir",
+            "description": "List files and directories under a path with depth and entry limits.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Directory relative to workspace root (use '.' for root).",
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "description": "Max depth below the directory (default 1).",
+                    },
+                    "max_entries": {
+                        "type": "integer",
+                        "description": "Maximum entries to list (default 200).",
+                    },
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "grep",
+            "description": (
+                "Search file contents with a Python regex (limited matches). "
+                "Scope is relative to workspace."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression."},
+                    "path": {
+                        "type": "string",
+                        "description": "File or directory relative to workspace (default '.').",
+                    },
+                    "max_matches": {
+                        "type": "integer",
+                        "description": "Maximum matches to return (default 50).",
+                    },
+                },
+                "required": ["pattern"],
+            },
+        },
+    },
+]
+
+_DEFAULT_READ_LINES = 500
+_DEFAULT_LIST_DEPTH = 1
+_DEFAULT_LIST_MAX = 200
+_DEFAULT_GREP_MAX = 50
+_MAX_TOOL_JSON_CHARS = 80_000
+
+
+def _tool_error(code: str, message: str) -> str:
+    return json.dumps({"ok": False, "error": {"code": code, "message": message}}, ensure_ascii=False)
+
+
+def _truncate_payload(text: str) -> tuple[str, bool]:
+    if len(text) <= _MAX_TOOL_JSON_CHARS:
+        return text, False
+    return text[: _MAX_TOOL_JSON_CHARS] + "\n… [truncated]", True
+
+
+def _read_file(workspace: Path, args: dict[str, Any]) -> str:
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return _tool_error("INVALID_ARGUMENT", "read_file requires non-empty string path")
+    offset = args.get("offset", 0)
+    limit = args.get("limit", _DEFAULT_READ_LINES)
+    try:
+        off = int(offset) if offset is not None else 0
+        lim = int(limit) if limit is not None else _DEFAULT_READ_LINES
+    except (TypeError, ValueError):
+        return _tool_error("INVALID_ARGUMENT", "offset and limit must be integers")
+    if off < 0 or lim < 1:
+        return _tool_error("INVALID_ARGUMENT", "offset must be >= 0 and limit >= 1")
+    try:
+        target = resolve_under_workspace(workspace, path)
+    except PathOutsideWorkspaceError as e:
+        return _tool_error("PATH_OUTSIDE_WORKSPACE", str(e))
+    if not target.is_file():
+        return _tool_error("NOT_FOUND", f"Not a file: {path}")
+    try:
+        raw = target.read_bytes()
+    except OSError as e:
+        return _tool_error("IO_ERROR", f"Cannot read file: {e}")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return _tool_error("ENCODING", "File is not valid UTF-8; binary or other encoding.")
+    lines = text.splitlines()
+    end = min(len(lines), off + lim)
+    slice_lines = lines[off:end]
+    truncated = end < len(lines) or off > 0
+    payload = {
+        "ok": True,
+        "path": path,
+        "offset": off,
+        "lines": slice_lines,
+        "total_lines": len(lines),
+        "truncated": truncated or len(slice_lines) >= lim,
+    }
+    out = json.dumps(payload, ensure_ascii=False)
+    out, _ = _truncate_payload(out)
+    return out
+
+
+def _list_dir(workspace: Path, args: dict[str, Any]) -> str:
+    path = args.get("path")
+    if not isinstance(path, str):
+        return _tool_error("INVALID_ARGUMENT", "list_dir requires string path")
+    depth = args.get("depth", _DEFAULT_LIST_DEPTH)
+    max_entries = args.get("max_entries", _DEFAULT_LIST_MAX)
+    try:
+        d = int(depth) if depth is not None else _DEFAULT_LIST_DEPTH
+        cap = int(max_entries) if max_entries is not None else _DEFAULT_LIST_MAX
+    except (TypeError, ValueError):
+        return _tool_error("INVALID_ARGUMENT", "depth and max_entries must be integers")
+    if d < 1 or cap < 1:
+        return _tool_error("INVALID_ARGUMENT", "depth and max_entries must be >= 1")
+    try:
+        target = resolve_under_workspace(workspace, path)
+    except PathOutsideWorkspaceError as e:
+        return _tool_error("PATH_OUTSIDE_WORKSPACE", str(e))
+    if not target.is_dir():
+        return _tool_error("NOT_FOUND", f"Not a directory: {path}")
+    entries: list[str] = []
+    truncated = False
+
+    def walk(current: Path, current_depth: int) -> str | None:
+        nonlocal truncated
+        if current_depth > d:
+            return None
+        try:
+            names = sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError as e:
+            return _tool_error("IO_ERROR", str(e))
+        for child in names:
+            if len(entries) >= cap:
+                truncated = True
+                return None
+            rel = child.relative_to(workspace)
+            entries.append(str(rel).replace("\\", "/"))
+            if child.is_dir() and current_depth < d:
+                err = walk(child, current_depth + 1)
+                if err is not None:
+                    return err
+            if len(entries) >= cap:
+                truncated = True
+                return None
+        return None
+
+    err = walk(target, 1)
+    if err is not None:
+        return err
+    payload = {"ok": True, "path": path, "entries": entries, "truncated": truncated}
+    out = json.dumps(payload, ensure_ascii=False)
+    out, _ = _truncate_payload(out)
+    return out
+
+
+def _grep(workspace: Path, args: dict[str, Any]) -> str:
+    pattern = args.get("pattern")
+    path = args.get("path", ".")
+    max_matches = args.get("max_matches", _DEFAULT_GREP_MAX)
+    if not isinstance(pattern, str) or not pattern:
+        return _tool_error("INVALID_ARGUMENT", "grep requires non-empty pattern string")
+    if not isinstance(path, str):
+        return _tool_error("INVALID_ARGUMENT", "path must be a string")
+    try:
+        cap = int(max_matches) if max_matches is not None else _DEFAULT_GREP_MAX
+    except (TypeError, ValueError):
+        return _tool_error("INVALID_ARGUMENT", "max_matches must be an integer")
+    if cap < 1:
+        return _tool_error("INVALID_ARGUMENT", "max_matches must be >= 1")
+    try:
+        rx = re.compile(pattern)
+    except re.error as e:
+        return _tool_error("BAD_REGEX", str(e))
+    try:
+        scope = resolve_under_workspace(workspace, path)
+    except PathOutsideWorkspaceError as e:
+        return _tool_error("PATH_OUTSIDE_WORKSPACE", str(e))
+    matches: list[dict[str, Any]] = []
+    truncated = False
+
+    def scan_file(fp: Path) -> None:
+        nonlocal truncated
+        try:
+            text = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        for i, line in enumerate(text.splitlines(), start=1):
+            if rx.search(line) is None:
+                continue
+            rel = str(fp.relative_to(workspace)).replace("\\", "/")
+            matches.append({"path": rel, "line": i, "text": line[:500]})
+            if len(matches) >= cap:
+                truncated = True
+                return
+
+    if scope.is_file():
+        scan_file(scope)
+    elif scope.is_dir():
+        for fp in sorted(scope.rglob("*")):
+            if not fp.is_file():
+                continue
+            scan_file(fp)
+            if truncated:
+                break
+    else:
+        return _tool_error("NOT_FOUND", f"Path not found: {path}")
+
+    payload = {"ok": True, "pattern": pattern, "matches": matches, "truncated": truncated}
+    out = json.dumps(payload, ensure_ascii=False)
+    out, _ = _truncate_payload(out)
+    return out
+
+
+def execute_tool(workspace: Path, name: str, arguments_json: str) -> str:
+    """Run a tool by name; always returns a string (JSON object) for the model."""
+    try:
+        args = json.loads(arguments_json or "{}")
+        if not isinstance(args, dict):
+            return _tool_error("INVALID_ARGUMENT", "Tool arguments must be a JSON object")
+    except json.JSONDecodeError as e:
+        return _tool_error("INVALID_JSON", f"Invalid tool arguments JSON: {e}")
+    if name == "read_file":
+        return _read_file(workspace, args)
+    if name == "list_dir":
+        return _list_dir(workspace, args)
+    if name == "grep":
+        return _grep(workspace, args)
+    return _tool_error("UNKNOWN_TOOL", f"Unknown tool: {name}")

@@ -14,6 +14,8 @@ dependencies = [
   "typer>=0.12,<1",
   "rich>=13.7,<14",
   "pydantic>=2.6,<3",
+  "openai>=1.40,<2",
+  "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]

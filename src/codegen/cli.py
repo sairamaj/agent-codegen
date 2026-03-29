@@ -1,4 +1,4 @@
-"""CLI entry (P0-01, P0-02, P0-03, P0-04)."""
+"""CLI entry (P0-01 … P0-04, P0-E2 run)."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from typing import Annotated, Any, Optional
 import typer
 
 from codegen import __version__
+from codegen.agent_loop import run_agent_task
 from codegen.bootstrap import bootstrap
 from codegen.config import CodegenConfigError
 from codegen.console import make_console
@@ -18,11 +19,13 @@ app = typer.Typer(
     invoke_without_command=True,
     context_settings={"help_option_names": ["-h", "--help"]},
     help=(
-        "Workspace-scoped coding agent. Global options apply to subcommands.\n\n"
-        "Config: TOML file via --config, CODEGEN_CONFIG, or <workspace>/codegen.toml. "
+        "Workspace-scoped coding agent. Use ``codegen -w DIR run TASK`` or "
+        "``codegen run TASK -w DIR`` (same for ``info``).\n\n"
+        "Config: TOML file via --config, CODEGEN_CONFIG, or <workspace>/codegen.toml; "
+        "optional .env under workspace or a parent dir (loaded before env merge). "
         "Keys: model, base_url, max_iterations, max_wall_clock_seconds, agents_md. "
         "Environment: OPENAI_API_KEY (secret, never printed), OPENAI_BASE_URL, OPENAI_MODEL, "
-        "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD."
+        "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG."
     ),
 )
 
@@ -71,7 +74,7 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Codegen CLI — Phase 0 read-only agent (tools and loop in later stories)."""
+    """Codegen CLI — Phase 0 read-only agent (see ``codegen run``)."""
     ctx.obj = {
         "workspace": workspace,
         "config": config,
@@ -83,12 +86,29 @@ def main(
 
 
 @app.command("info")
-def info_cmd(ctx: typer.Context) -> None:
+def info_cmd(
+    ctx: typer.Context,
+    workspace: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--workspace",
+            "-w",
+            help="Workspace root (overrides global ``-w`` when placed after ``info``).",
+        ),
+    ] = None,
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file (overrides global ``-c`` when placed after ``info``).",
+        ),
+    ] = None,
+) -> None:
     """Show resolved workspace, config (secrets redacted), and whether project rules loaded."""
     console = make_console()
+    workspace_arg, config_arg = _merged_workspace_config(ctx, workspace, config)
     o: dict[str, Any] = ctx.obj
-    workspace_arg: Path | None = o["workspace"]
-    config_arg: Path | None = o["config"]
     verbose: int = o["verbose"]
 
     try:
@@ -130,6 +150,75 @@ def info_cmd(ctx: typer.Context) -> None:
         n = len(result.project_rules_text)
         console.print("[muted]project rules:[/muted] ", end="")
         console.print(f"loaded ({n} characters)")
+
+
+def _build_system_prompt(workspace_display: str, project_rules: str | None) -> str:
+    parts = [
+        "You are Codegen, a workspace-scoped coding assistant.",
+        f"Workspace root: {workspace_display}",
+        "You have read-only tools: read_file, list_dir, grep. Paths are relative to the workspace.",
+        "Prefer tools over guessing file contents.",
+    ]
+    if project_rules:
+        parts.append("Project rules (follow when relevant):\n" + project_rules)
+    return "\n\n".join(parts)
+
+
+def _merged_workspace_config(
+    ctx: typer.Context,
+    workspace: Optional[Path],
+    config: Optional[Path],
+) -> tuple[Optional[Path], Optional[Path]]:
+    """Subcommand ``-w``/``-c`` override the parent callback options."""
+    o: dict[str, Any] = ctx.obj
+    w = workspace if workspace is not None else o["workspace"]
+    c = config if config is not None else o["config"]
+    return w, c
+
+
+@app.command("run")
+def run_cmd(
+    ctx: typer.Context,
+    task: Annotated[str, typer.Argument(help="Task in natural language.")],
+    workspace: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--workspace",
+            "-w",
+            help="Workspace root (overrides global ``-w`` when placed after ``run``).",
+        ),
+    ] = None,
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file (overrides global ``-c`` when placed after ``run``).",
+        ),
+    ] = None,
+) -> None:
+    """Run the agent: OpenAI drives read-only tools; output is streamed."""
+    console = make_console()
+    workspace_arg, config_arg = _merged_workspace_config(ctx, workspace, config)
+
+    try:
+        result = bootstrap(workspace_arg, config_arg)
+    except WorkspaceError as e:
+        console.print(f"[error]{e}[/error]")
+        raise typer.Exit(1) from e
+    except CodegenConfigError as e:
+        console.print(f"[error]{e}[/error]")
+        raise typer.Exit(2) from e
+
+    system = _build_system_prompt(str(result.workspace), result.project_rules_text)
+    out = run_agent_task(
+        workspace=result.workspace,
+        config=result.config,
+        system_prompt=system,
+        user_message=task,
+        console=console,
+    )
+    raise typer.Exit(out.exit_code)
 
 
 def run() -> None:
