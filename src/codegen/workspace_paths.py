@@ -9,6 +9,20 @@ class PathOutsideWorkspaceError(Exception):
     """Path escapes the workspace (traversal, symlink, or absolute outside root)."""
 
 
+def resolved_path_is_under_workspace(workspace: Path, path: Path) -> bool:
+    """
+    True if ``path`` resolves to a location strictly under ``workspace``.
+
+    Used to skip symlink-escaped paths during directory traversal (grep, list_dir).
+    """
+    root = workspace.expanduser().resolve(strict=True)
+    try:
+        path.resolve().relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
 def resolve_under_workspace(workspace: Path, relative_path: str) -> Path:
     """
     Resolve ``relative_path`` to an absolute path that must stay under ``workspace``.

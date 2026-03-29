@@ -1,4 +1,4 @@
-"""Read-only workspace tools: schemas + execution (P0-E2 with P0-E3-shaped contracts)."""
+"""Read-only workspace tools: schemas + execution (P0-E3)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,11 @@ import re
 from pathlib import Path
 from typing import Any
 
-from codegen.workspace_paths import PathOutsideWorkspaceError, resolve_under_workspace
+from codegen.workspace_paths import (
+    PathOutsideWorkspaceError,
+    resolved_path_is_under_workspace,
+    resolve_under_workspace,
+)
 
 # OpenAI Chat Completions `tools=[{"type":"function","function":{...}}]` entries.
 TOOL_DEFINITIONS: list[dict[str, Any]] = [
@@ -33,6 +37,13 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of lines to return (optional).",
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum bytes read from disk before decoding (default 262144). "
+                            "Truncation is indicated in the result."
+                        ),
                     },
                 },
                 "required": ["path"],
@@ -92,6 +103,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 _DEFAULT_READ_LINES = 500
+_DEFAULT_READ_MAX_BYTES = 262_144  # 256 KiB
 _DEFAULT_LIST_DEPTH = 1
 _DEFAULT_LIST_MAX = 200
 _DEFAULT_GREP_MAX = 50
@@ -114,13 +126,17 @@ def _read_file(workspace: Path, args: dict[str, Any]) -> str:
         return _tool_error("INVALID_ARGUMENT", "read_file requires non-empty string path")
     offset = args.get("offset", 0)
     limit = args.get("limit", _DEFAULT_READ_LINES)
+    max_bytes = args.get("max_bytes", _DEFAULT_READ_MAX_BYTES)
     try:
         off = int(offset) if offset is not None else 0
         lim = int(limit) if limit is not None else _DEFAULT_READ_LINES
+        max_b = int(max_bytes) if max_bytes is not None else _DEFAULT_READ_MAX_BYTES
     except (TypeError, ValueError):
-        return _tool_error("INVALID_ARGUMENT", "offset and limit must be integers")
+        return _tool_error("INVALID_ARGUMENT", "offset, limit, and max_bytes must be integers")
     if off < 0 or lim < 1:
         return _tool_error("INVALID_ARGUMENT", "offset must be >= 0 and limit >= 1")
+    if max_b < 1:
+        return _tool_error("INVALID_ARGUMENT", "max_bytes must be >= 1")
     try:
         target = resolve_under_workspace(workspace, path)
     except PathOutsideWorkspaceError as e:
@@ -128,7 +144,13 @@ def _read_file(workspace: Path, args: dict[str, Any]) -> str:
     if not target.is_file():
         return _tool_error("NOT_FOUND", f"Not a file: {path}")
     try:
-        raw = target.read_bytes()
+        file_size = target.stat().st_size
+    except OSError as e:
+        return _tool_error("IO_ERROR", f"Cannot stat file: {e}")
+    truncated_bytes = file_size > max_b
+    try:
+        with open(target, "rb") as f:
+            raw = f.read(max_b)
     except OSError as e:
         return _tool_error("IO_ERROR", f"Cannot read file: {e}")
     try:
@@ -138,14 +160,17 @@ def _read_file(workspace: Path, args: dict[str, Any]) -> str:
     lines = text.splitlines()
     end = min(len(lines), off + lim)
     slice_lines = lines[off:end]
-    truncated = end < len(lines) or off > 0
+    truncated_lines = end < len(lines) or off > 0 or len(slice_lines) >= lim
     payload = {
         "ok": True,
         "path": path,
         "offset": off,
         "lines": slice_lines,
         "total_lines": len(lines),
-        "truncated": truncated or len(slice_lines) >= lim,
+        "file_size_bytes": file_size,
+        "bytes_read": len(raw),
+        "truncated": truncated_bytes or truncated_lines,
+        "truncated_bytes": truncated_bytes,
     }
     out = json.dumps(payload, ensure_ascii=False)
     out, _ = _truncate_payload(out)
@@ -189,6 +214,8 @@ def _list_dir(workspace: Path, args: dict[str, Any]) -> str:
             rel = child.relative_to(workspace)
             entries.append(str(rel).replace("\\", "/"))
             if child.is_dir() and current_depth < d:
+                if not resolved_path_is_under_workspace(workspace, child):
+                    continue
                 err = walk(child, current_depth + 1)
                 if err is not None:
                     return err
@@ -251,6 +278,8 @@ def _grep(workspace: Path, args: dict[str, Any]) -> str:
     elif scope.is_dir():
         for fp in sorted(scope.rglob("*")):
             if not fp.is_file():
+                continue
+            if not resolved_path_is_under_workspace(workspace, fp):
                 continue
             scan_file(fp)
             if truncated:

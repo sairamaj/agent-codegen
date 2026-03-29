@@ -43,7 +43,6 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ## Not started yet (Phase 0 remainder)
 
-- **P0-E3** — Read-only tools (full story set: caps, traversal tests): partial overlap — basic `read_file` / `list_dir` / `grep` exist for the loop; formal P0-09–P0-12 acceptance may still add tests and tuning.
 - **P0-E4** — Colored console UX (four semantic styles, compact tool summaries, etc.).
 - **P0-E5** — Structured logging / trace IDs (P0-16).
 
@@ -52,6 +51,28 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 ## 2026-03-29 — CLI: workspace on `run` / `info`
 
 Subcommands **`run`** and **`info`** accept **`--workspace` / `-w`** and **`--config` / `-c`** after the subcommand name (in addition to global `codegen -w DIR run …`). So `codegen run "task" -w ..\kb` works.
+
+---
+
+## 2026-03-29 — Epic P0-E3: Read-only tools
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P0-09 | Done | `read_file`: line slice (`offset`/`limit`, default 500 lines), byte cap (`max_bytes`, default 256 KiB) with `truncated` / `truncated_bytes`, `file_size_bytes`, `bytes_read`; reads only up to `max_bytes` from disk. |
+| P0-10 | Done | `list_dir`: `depth` and `max_entries` (defaults 1 and 200); `truncated` when cap hit. |
+| P0-11 | Done | `grep`: Python regex, scoped path, `max_matches` (default 50), `truncated`; traversal skips paths whose resolved target leaves the workspace. |
+| P0-12 | Done | `resolve_under_workspace` unchanged; `resolved_path_is_under_workspace` for traversal; `list_dir` / `grep` do not follow symlink escapes; tests for `..`, absolute outside, symlink-to-outside (grep/list/read). |
+
+**Code**
+
+- `codegen.workspace_paths`: `resolved_path_is_under_workspace`.
+- `codegen.tools_readonly`: byte-limited reads, symlink-safe `list_dir` recurse and `grep` file scan.
+
+**Tests**
+
+- Extended `tests/test_tools_readonly.py` and `tests/test_workspace_paths.py` (caps, regex error, symlink cases; symlink tests skip when OS cannot create links).
 
 ---
 
