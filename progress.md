@@ -4,40 +4,6 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
-## 2026-03-29 — Epic P1-E3: Session audit
-
-**Stories**
-
-| Story | Status | Notes |
-|-------|--------|--------|
-| P1-08 | Done | **`session_audit`** config + `CODEGEN_SESSION_AUDIT`: append-only **NDJSON** with `audit.run_start`, ordered **`audit.tool`** (`seq`, `tool_call_id`, `tool_name`, `args_sanitized`, `result_sanitized` capped/redacted, `duration_ms`, `outcome`), `audit.run_end`. Same **`trace_id` / `session_id`** as structured log when both enabled (`open_structured_logger(..., trace_id=..., session_id=...)`). Module: `codegen.session_audit`; wired in `agent_loop` + `cli run`. |
-| P1-09 | Done | **System prompt** instructs the model to ask a **short clarifying question** before substantive `apply_patch` / `run_terminal_cmd` when the task is ambiguous or missing critical detail (`cli._build_system_prompt`). |
-
-**Code / tests**
-
-- `codegen.session_audit`, `codegen.observability` (optional trace/session ids for structured logger), `codegen.config` (`session_audit`, `CODEGEN_SESSION_AUDIT`), `codegen.agent_loop`, `codegen.cli` (`info` shows `session_audit`), `.env.example`.
-- Tests: `tests/test_session_audit.py`, `tests/test_agent_loop.py` (`test_session_audit_ordered_tool_records`), `tests/test_observability.py`, `tests/test_config.py`, `tests/test_cli.py`.
-
----
-
-## 2026-03-29 — Epic P1-E2: Terminal and policy
-
-**Stories**
-
-| Story | Status | Notes |
-|-------|--------|--------|
-| P1-04 | Done | **`run_terminal_cmd`**: `command` + optional `cwd` (workspace-relative via `resolve_under_workspace`); `subprocess.run` with `shell=True`, `shell_timeout_seconds` / `shell_max_output_bytes` from config; stdout/stderr captured with truncation; `TIMEOUT` on limit. Tool def + impl: `codegen.tools_terminal`. |
-| P1-05 | Done | **Allow/deny/require_approval** via `CommandPolicy` + `command_policy_from_config` (fnmatch, case-normalized). `command_denylist` / `command_require_approval` `None` = built-in defaults; `[]` = explicit empty. Deny shown with `[error]` on console. |
-| P1-06 | Done | **`--mode plan`**: `tool_definitions_for_mode` exposes only read-only tools; `execute_tool` rejects `apply_patch` / `run_terminal_cmd` with `PLAN_MODE` if invoked. Banner + system prompt list tools by mode. |
-| P1-07 | Done | **TTY approval** for `require_approval` matches: `prompt_for_command_approval` + `--yes` / `auto_approve` to skip. Non-TTY denies approval. Structured log: `approval.request`, `approval.decision` (`approved`/`denied`). |
-
-**Code / tests**
-
-- `codegen.command_policy`, `codegen.tools_terminal`, `codegen.tool_dispatch`, `codegen.tools_readonly` (`tool_definitions_for_mode`, `execute_tool` dispatch), `codegen.agent_loop`, `codegen.config`, `codegen.cli` (`--mode`, `--yes`).
-- Tests: `tests/test_command_policy.py`, `tests/test_tools_terminal_policy.py` (includes X-03-style denied command never runs subprocess).
-
----
-
 ## 2026-03-29 — Epic P1-E1: Patches and edits
 
 **Stories**
@@ -52,6 +18,40 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 - `codegen.tools_patch`, `codegen.tools_readonly` (tool def + dispatch), `tests/test_tools_patch.py`.
 - **UX / connectivity (same window):** clearer OpenAI connection/timeout messages; `codegen.http_env` validates `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` must use a full URL; `OPENAI_BASE_URL` must include `http://` or `https://` when set (`codegen.config`).
+
+---
+
+## 2026-03-29 — Epic P1-E2: Terminal and policy
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P1-04 | Done | **`run_terminal_cmd`**: `command` + optional `cwd` (workspace-relative via `resolve_under_workspace`); `subprocess.run` with `shell=True`, `shell_timeout_seconds` / `shell_max_output_bytes` from config; stdout/stderr captured with truncation; `TIMEOUT` on limit. Tool def + impl: `codegen.tools_terminal`. |
+| P1-05 | Done | **Allow/deny/require_approval** via `CommandPolicy` + `command_policy_from_config` (fnmatch, case-normalized). `command_denylist` / `command_require_approval` `None` = built-in defaults; `[]` = explicit empty. Non-empty **`command_allowlist`** means the command must match at least one pattern. Deny shown with `[error]` on console. |
+| P1-06 | Done | **`--mode plan`**: `tool_definitions_for_mode` exposes only read-only tools; `execute_tool` rejects `apply_patch` / `run_terminal_cmd` with `PLAN_MODE` if invoked. Banner + system prompt list tools by mode. |
+| P1-07 | Done | **TTY approval** for `require_approval` matches: `prompt_for_command_approval` + `--yes` / `auto_approve` to skip. Non-TTY stdin yields denial from the prompt path; omitting `approval_callback` in dispatch yields `APPROVAL_REQUIRED`. Structured log: `approval.request`, `approval.decision` (`approved`/`denied`). |
+
+**Code / tests**
+
+- `codegen.command_policy`, `codegen.tools_terminal`, `codegen.tool_dispatch`, `codegen.tools_readonly` (`tool_definitions_for_mode`, `execute_tool` dispatch), `codegen.agent_loop`, `codegen.config`, `codegen.cli` (`--mode`, `--yes`), `.env.example` (`CODEGEN_COMMAND_*`, shell limits).
+- Tests: `tests/test_command_policy.py`, `tests/test_tools_terminal_policy.py` (X-03: denied command never runs `subprocess.run`; approval denied skips subprocess). **Verification:** full `pytest` run passes (104 tests).
+
+---
+
+## 2026-03-29 — Epic P1-E3: Session audit
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P1-08 | Done | **`session_audit`** config + `CODEGEN_SESSION_AUDIT`: append-only **NDJSON** with `audit.run_start`, ordered **`audit.tool`** (`seq`, `tool_call_id`, `tool_name`, `args_sanitized`, `result_sanitized` capped/redacted, `duration_ms`, `outcome`), `audit.run_end`. Same **`trace_id` / `session_id`** as structured log when both enabled (`open_structured_logger(..., trace_id=..., session_id=...)`). Module: `codegen.session_audit`; wired in `agent_loop` + `cli run`. |
+| P1-09 | Done | **System prompt** instructs the model to ask a **short clarifying question** before substantive `apply_patch` / `run_terminal_cmd` when the task is ambiguous or missing critical detail (`cli._build_system_prompt`). |
+
+**Code / tests**
+
+- `codegen.session_audit`, `codegen.observability` (optional trace/session ids for structured logger), `codegen.config` (`session_audit`, `CODEGEN_SESSION_AUDIT`), `codegen.agent_loop`, `codegen.cli` (`info` shows `session_audit`), `.env.example`.
+- Tests: `tests/test_session_audit.py`, `tests/test_agent_loop.py` (`test_session_audit_ordered_tool_records`), `tests/test_observability.py`, `tests/test_config.py`, `tests/test_cli.py`.
 
 ---
 
