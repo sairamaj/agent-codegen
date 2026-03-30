@@ -12,6 +12,7 @@ from codegen.config import CodegenConfig
 from codegen.gitignore_filter import GitignoreMatcher
 from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
 from codegen.tools_terminal import RUN_TERMINAL_CMD_TOOL_DEFINITION, run_terminal_cmd
+from codegen.tools_web import WEB_FETCH_TOOL_DEFINITION, web_fetch
 from codegen.tool_dispatch import ToolDispatchContext
 from codegen.verification_hooks import attach_verification_to_patch_result, run_verification_hooks
 from codegen.workspace_paths import (
@@ -110,17 +111,26 @@ _READONLY_TOOL_DEFINITIONS: list[dict[str, Any]] = [
 ]
 
 
-def tool_definitions_for_mode(mode: Literal["plan", "execute"]) -> list[dict[str, Any]]:
-    """Plan mode exposes only read-only tools; execute adds patch + shell."""
+def tool_definitions_for_mode(
+    mode: Literal["plan", "execute"],
+    *,
+    config: CodegenConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Plan mode exposes only read-only tools; execute adds patch + shell.
+
+    Optional ``web_fetch`` is registered when ``config.web_fetch_enabled`` is true (P2-07).
+    """
     defs = list(_READONLY_TOOL_DEFINITIONS)
+    if config is not None and config.web_fetch_enabled:
+        defs.append(WEB_FETCH_TOOL_DEFINITION)
     if mode == "execute":
         defs.append(APPLY_PATCH_TOOL_DEFINITION)
         defs.append(RUN_TERMINAL_CMD_TOOL_DEFINITION)
     return defs
 
 
-# Backward compatibility: full toolset (execute mode).
-TOOL_DEFINITIONS: list[dict[str, Any]] = tool_definitions_for_mode("execute")
+# Backward compatibility: full toolset (execute mode), no optional web_fetch.
+TOOL_DEFINITIONS: list[dict[str, Any]] = tool_definitions_for_mode("execute", config=None)
 
 _DEFAULT_READ_LINES = 500
 _DEFAULT_READ_MAX_BYTES = 262_144  # 256 KiB
@@ -404,6 +414,13 @@ def execute_tool(
         return _list_dir(workspace, args, gitignore=gi)
     if name == "grep":
         return _grep(workspace, args, gitignore=gi)
+    if name == "web_fetch":
+        if config is None or not config.web_fetch_enabled:
+            return _tool_error(
+                "WEB_FETCH_DISABLED",
+                "web_fetch is disabled; set web_fetch_enabled in config (or CODEGEN_WEB_FETCH_ENABLED=true).",
+            )
+        return web_fetch(args, config)
     if name == "apply_patch":
         raw = apply_patch(workspace, args)
         if config is None or not config.verification_hooks:

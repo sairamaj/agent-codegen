@@ -43,7 +43,8 @@ app = typer.Typer(
         "CODEGEN_STRUCTURED_LOG, CODEGEN_SESSION_AUDIT, CODEGEN_COMMAND_ALLOWLIST, "
         "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
         "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE, "
-        "CODEGEN_RESPECT_GITIGNORE, CODEGEN_SESSION_FILE, CODEGEN_MAX_HISTORY_CHARS."
+        "CODEGEN_RESPECT_GITIGNORE, CODEGEN_SESSION_FILE, CODEGEN_MAX_HISTORY_CHARS, "
+        "CODEGEN_WEB_FETCH_ENABLED, CODEGEN_WEB_FETCH_MAX_BYTES, CODEGEN_WEB_FETCH_TIMEOUT_SECONDS."
     ),
 )
 
@@ -175,6 +176,12 @@ def info_cmd(
         console.print(summary["session_file"] or "(off)")
         console.print("[muted]max_history_chars:[/muted] ", end="")
         console.print(str(summary["max_history_chars"]))
+        console.print("[muted]web_fetch:[/muted] ", end="")
+        console.print(
+            f"on (max {summary['web_fetch_max_bytes']} B, {summary['web_fetch_timeout_seconds']}s)"
+            if summary["web_fetch_enabled"]
+            else "off"
+        )
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -191,13 +198,23 @@ def _build_system_prompt(
     *,
     agent_mode: Literal["plan", "execute"] = "execute",
     respect_gitignore: bool = True,
+    web_fetch_enabled: bool = False,
 ) -> str:
+    wf = (
+        "web_fetch (optional HTTP GET to public https/http URLs, size- and time-bounded; truncation is explicit in results), "
+        if web_fetch_enabled
+        else ""
+    )
     tools_line = (
-        "You have tools: read_file, list_dir, grep, apply_patch (structured edits), run_terminal_cmd. "
+        f"You have tools: read_file, list_dir, grep, {wf}apply_patch (structured edits), run_terminal_cmd. "
         "If the workspace config lists verification_hooks, they run automatically after a fully "
         "successful apply_patch; check the verification field in the tool result (policy fail vs warn). "
         if agent_mode == "execute"
-        else "You have read-only tools: read_file, list_dir, grep. "
+        else (
+            "You have read-only tools: read_file, list_dir, grep"
+            + (", web_fetch (optional HTTP GET to public URLs, bounded)" if web_fetch_enabled else "")
+            + ". "
+        )
     )
     gi_line = (
         "list_dir and grep skip paths matched by workspace .gitignore files (configurable)."
@@ -322,6 +339,7 @@ def run_cmd(
         result.project_rules_text,
         agent_mode=agent_mode,
         respect_gitignore=result.config.respect_gitignore,
+        web_fetch_enabled=result.config.web_fetch_enabled,
     )
     trace_id = new_trace_id()
     session_path = resolve_session_storage_path(

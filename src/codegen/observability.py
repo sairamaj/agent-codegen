@@ -120,6 +120,16 @@ def tool_context_debug_fields(tool_name: str, result_json: str) -> dict[str, Any
             "context_match_snippets": len(matches),
         }
 
+    if tool_name == "web_fetch":
+        url = d.get("url")
+        if isinstance(url, str) and url:
+            u = url if len(url) <= 200 else url[:197] + "..."
+            return {
+                "context_paths": [u],
+                "context_path_count": 1,
+                "context_web_fetch_bytes": int(d.get("bytes_read") or 0),
+            }
+
     return {}
 
 

@@ -13,6 +13,9 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.base_url is None
     assert cfg.openai_api_key is None
     assert cfg.respect_gitignore is True
+    assert cfg.web_fetch_enabled is False
+    assert cfg.web_fetch_max_bytes == 262_144
+    assert cfg.web_fetch_timeout_seconds == 30
 
 
 def test_load_from_toml(tmp_path: Path) -> None:
@@ -113,3 +116,13 @@ def test_respect_gitignore_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("CODEGEN_RESPECT_GITIGNORE", "false")
     cfg = load_config(workspace=tmp_path)
     assert cfg.respect_gitignore is False
+
+
+def test_web_fetch_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEGEN_WEB_FETCH_ENABLED", "true")
+    monkeypatch.setenv("CODEGEN_WEB_FETCH_MAX_BYTES", "524288")
+    monkeypatch.setenv("CODEGEN_WEB_FETCH_TIMEOUT_SECONDS", "45")
+    cfg = load_config(workspace=tmp_path)
+    assert cfg.web_fetch_enabled is True
+    assert cfg.web_fetch_max_bytes == 524_288
+    assert cfg.web_fetch_timeout_seconds == 45

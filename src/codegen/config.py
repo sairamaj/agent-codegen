@@ -43,6 +43,9 @@ class CodegenConfig(BaseModel):
     - CODEGEN_RESPECT_GITIGNORE — ``true`` / ``false`` (default true): skip ignored paths in list_dir/grep.
     - CODEGEN_SESSION_FILE — optional session path or name for resume (P2-04).
     - CODEGEN_MAX_HISTORY_CHARS — integer budget for prior history before compaction (P2-05).
+    - CODEGEN_WEB_FETCH_ENABLED — ``true`` / ``false`` (default false): enable optional web_fetch tool (P2-07).
+    - CODEGEN_WEB_FETCH_MAX_BYTES — max response bytes (default 262144).
+    - CODEGEN_WEB_FETCH_TIMEOUT_SECONDS — per-request timeout (default 30).
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -105,6 +108,38 @@ class CodegenConfig(BaseModel):
         le=2_000_000,
         description="Approximate max chars for prior messages before compaction (JSON-sized estimate).",
     )
+    # P2-07: optional HTTP GET (FR-TOOL-8); off by default
+    web_fetch_enabled: bool = Field(
+        default=False,
+        description="When true, register web_fetch (bounded HTTP GET). Network is off by default.",
+    )
+    web_fetch_max_bytes: int = Field(
+        default=262_144,
+        ge=1024,
+        le=2_000_000,
+        description="Max bytes read from a single web_fetch response body.",
+    )
+    web_fetch_timeout_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=600,
+        description="HTTP client timeout for web_fetch (seconds).",
+    )
+
+    @field_validator("web_fetch_enabled", mode="before")
+    @classmethod
+    def validate_web_fetch_enabled(cls, v: Any) -> bool:
+        if v is None:
+            return False
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off", ""):
+                return False
+        raise ValueError("web_fetch_enabled must be a boolean")
 
     @field_validator("respect_gitignore", mode="before")
     @classmethod
@@ -186,6 +221,9 @@ class CodegenConfig(BaseModel):
             "respect_gitignore": self.respect_gitignore,
             "session_file": self._session_file_public(),
             "max_history_chars": self.max_history_chars,
+            "web_fetch_enabled": self.web_fetch_enabled,
+            "web_fetch_max_bytes": self.web_fetch_max_bytes,
+            "web_fetch_timeout_seconds": self.web_fetch_timeout_seconds,
         }
 
     def _structured_log_public(self) -> str | None:
@@ -311,7 +349,8 @@ def load_config(
     command_require_approval, shell_timeout_seconds, shell_max_output_bytes,
     verification_hooks (array of strings), verification_failure (fail or warn),
     respect_gitignore (boolean, default true),
-    session_file (path or session name), max_history_chars (integer).
+    session_file (path or session name), max_history_chars (integer),
+    web_fetch_enabled (boolean, default false), web_fetch_max_bytes, web_fetch_timeout_seconds.
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -403,6 +442,33 @@ def load_config(
         except ValueError as e:
             raise CodegenConfigError(
                 f"CODEGEN_MAX_HISTORY_CHARS must be an integer, got {mh!r}"
+            ) from e
+
+    if os.environ.get("CODEGEN_WEB_FETCH_ENABLED") is not None:
+        raw = os.environ.get("CODEGEN_WEB_FETCH_ENABLED", "").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            merged["web_fetch_enabled"] = True
+        elif raw in ("0", "false", "no", "off", ""):
+            merged["web_fetch_enabled"] = False
+        else:
+            raise CodegenConfigError(
+                "CODEGEN_WEB_FETCH_ENABLED must be true/false (or 1/0, yes/no, on/off)"
+            )
+
+    if (wfb := os.environ.get("CODEGEN_WEB_FETCH_MAX_BYTES", "").strip()):
+        try:
+            merged["web_fetch_max_bytes"] = int(wfb)
+        except ValueError as e:
+            raise CodegenConfigError(
+                f"CODEGEN_WEB_FETCH_MAX_BYTES must be an integer, got {wfb!r}"
+            ) from e
+
+    if (wft := os.environ.get("CODEGEN_WEB_FETCH_TIMEOUT_SECONDS", "").strip()):
+        try:
+            merged["web_fetch_timeout_seconds"] = int(wft)
+        except ValueError as e:
+            raise CodegenConfigError(
+                f"CODEGEN_WEB_FETCH_TIMEOUT_SECONDS must be an integer, got {wft!r}"
             ) from e
 
     try:

@@ -84,6 +84,11 @@ def _context_trace_line(tool_name: str, fields: dict[str, Any]) -> str | None:
         m = int(fields.get("context_match_snippets", 0))
         u = int(fields.get("context_path_count", 0))
         return f"grep → {m} match snippet(s) across {u} file(s)"
+    if tool_name == "web_fetch":
+        b = int(fields.get("context_web_fetch_bytes", 0))
+        paths = fields.get("context_paths") or []
+        u = paths[0] if paths else "?"
+        return f"web_fetch → {b} byte(s) from {u}"
     return None
 
 
@@ -235,7 +240,7 @@ def run_agent_task(
         verbose=verbose,
     )
 
-    tools_for_run = tool_definitions_for_mode(agent_mode)
+    tools_for_run = tool_definitions_for_mode(agent_mode, config=config)
 
     own_client = client is None
     if client is None:
