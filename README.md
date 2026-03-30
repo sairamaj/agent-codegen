@@ -1,97 +1,157 @@
 # Codegen
 
-CLI coding agent for workspace-scoped tasks (OpenAI, read-only tools first, then edits and policy in later phases). See [docs/codegen_requirements.md](docs/codegen_requirements.md) and [docs/codegen_stories.md](docs/codegen_stories.md).
+## What and why
 
-**Requirements:** Python **3.11+**
+**Codegen** is a small **CLI coding agent**: you describe a task in natural language, and an **OpenAI** model drives a **transparent tool loop** (read files, search, apply patches, run shell commands—depending on mode and configuration) inside a **fixed workspace root**. It is built as an **educational** project: the goal is to **see how agent-style tools, streaming, policy, and sessions fit together**, not to replace a full IDE.
+
+- **What it does:** `codegen run "<task>"` sends your task to the model; the agent may call tools repeatedly until it finishes or hits limits.
+- **Why it exists:** To learn how **message → tool calls → execution → repeat** works with the official SDK, clear modules, and phased features (read-only exploration vs edits, approvals, audit logs, etc.).
+
+Details: [docs/codegen_requirements.md](docs/codegen_requirements.md), [docs/codegen_stories.md](docs/codegen_stories.md).
+
+**Requirements:** Python **3.11+**. An **OpenAI API key** (`OPENAI_API_KEY`) is required for `run`.
 
 ---
 
-## How to run (step by step)
+## Examples
 
-Follow these steps whenever you set up a new machine or clone the repo.
+Replace paths and tasks with your own. Global options (`-w`, `-c`, `-v`) can appear **before** the subcommand **or** on `info` / `run` (see `codegen run --help`).
 
-### 1. Go to the repo root
+### Discover commands
+
+```bash
+codegen --help
+codegen --version
+codegen run --help
+codegen info --help
+```
+
+### Inspect workspace and config (no API calls)
+
+```bash
+codegen info
+codegen -w . info
+codegen -w /path/to/project info
+codegen -v info
+```
+
+### One-shot tasks (execute mode is default: patches + terminal allowed per policy)
+
+```bash
+codegen run "Summarize what src/ does in three bullet points."
+codegen run "Find where the agent loop is implemented and list the file paths."
+codegen run "Add a one-line docstring to the main CLI entry if it's missing."
+codegen -w /path/to/repo run "List top-level files in the workspace."
+```
+
+### Plan-only (read-only tools: explore without edits or shell)
+
+```bash
+codegen run --mode plan "Map the module layout under src/ and suggest where tests should live."
+codegen run --mode plan "What does the config module load from disk?"
+```
+
+### Choose workspace explicitly
+
+```bash
+codegen -w . run "Run the test suite and report pass/fail."
+codegen run "Show README.md first 20 lines." -w .
+```
+
+### Interactive session (multiple turns; type `exit`, `quit`, or `:q` to leave)
+
+```bash
+codegen run -i
+codegen run -i -w /path/to/project
+codegen run --interactive --mode plan
+```
+
+### Auto-approve shell prompts (non-interactive environments)
+
+```bash
+codegen run --yes "Run pytest and show the last 30 lines of output."
+```
+
+### Session persistence (conversation + context stored for follow-up runs)
+
+```bash
+codegen run --session my-feature "Remember: we're adding CSV export."
+codegen run --session my-feature "Continue: wire the CLI flag next."
+```
+
+### Verbosity
+
+```bash
+codegen -v run "Trace which tools run; keep the task small."
+codegen -vv run "Even more detail for debugging."
+```
+
+### Module invocation (same as the `codegen` script after install)
+
+```bash
+python -m codegen --help
+python -m codegen -w . info
+python -m codegen run "Quick smoke: print workspace root via a tool."
+```
+
+---
+
+## How to run
+
+### 1. Clone and enter the repo
 
 ```bash
 cd /path/to/codegen
 ```
 
-On Windows (PowerShell):
+Windows (PowerShell):
 
 ```powershell
-cd c:\sai\dev\ai\agent\codegen
+cd c:\path\to\codegen
 ```
 
-### 2. (Recommended) Use a virtual environment
+### 2. Virtual environment (recommended)
 
 ```bash
 python -m venv .venv
 ```
 
-Activate it:
+Activate:
 
-- **Windows (PowerShell):** `.venv\Scripts\Activate.ps1`
-- **Windows (cmd):** `.venv\Scripts\activate.bat`
-- **macOS / Linux:** `source .venv/bin/activate`
+| Shell | Command |
+|-------|---------|
+| Windows PowerShell | `.venv\Scripts\Activate.ps1` |
+| Windows cmd | `.venv\Scripts\activate.bat` |
+| macOS / Linux | `source .venv/bin/activate` |
 
-### 3. Install the package
-
-Install in editable mode so code changes apply immediately:
+### 3. Install
 
 ```bash
 python -m pip install -e .
 ```
 
-For development (includes pytest):
+Development (includes pytest):
 
 ```bash
 python -m pip install -e ".[dev]"
 ```
 
-### 4. Run the CLI
+### 4. Configure API access
 
-You can use either form:
+Set `OPENAI_API_KEY` in the environment, or use a `.env` file (see [.env.example](.env.example)) in the workspace or a parent directory. The CLI never prints the key.
 
-| Method | Example |
-|--------|---------|
-| Installed script | `codegen --help` |
-| Module | `python -m codegen --help` |
+Optional: `codegen.toml` or `.codegen.toml` in the workspace, or `--config /path/to.toml`. See `codegen info` after setup.
 
-**Important:** Put **global options before the subcommand**. For example:
+### 5. Run the agent
 
 ```bash
 codegen -w /path/to/your/project info
+codegen -w /path/to/your/project run "Your task here."
 ```
 
-not `codegen info -w /path/to/your/project`.
-
-### 5. Useful commands (current phase)
-
-| Step | Command | What it does |
-|------|---------|----------------|
-| See all options | `codegen --help` | Lists globals (`--workspace`, `--config`, `--verbose`) and subcommands. |
-| Print version | `codegen --version` | Prints the package version. |
-| Check workspace + config | `codegen -w . info` | Resolves workspace, loads config (from TOML/env), shows redacted settings and whether project rules (`AGENTS.md`) loaded. |
-
-If you omit the subcommand, the CLI prints the same help as `--help` and exits successfully.
-
 ---
 
-## Configuration (optional)
-
-1. Optionally add **`codegen.toml`** or **`.codegen.toml`** in the **workspace** directory, or pass **`--config /path/to/file.toml`**.
-2. Optionally add **`.env`** in the **workspace** directory or a **parent** of it (same keys as environment variables below). The CLI walks up from the workspace path until it finds a `.env` file. Variables already set in your shell take precedence over `.env`.
-3. Set secrets via environment or `.env` (never commit keys). The CLI does **not** print `OPENAI_API_KEY`.
-
-See **`.env.example`** at the repo root for a template you can copy into a workspace as `.env`.
-
-**TOML keys (all optional):** `model`, `base_url`, `max_iterations`, `max_wall_clock_seconds`, `agents_md`
-
-**Environment variables:** `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `OPENAI_MODEL`, `CODEGEN_CONFIG`, `CODEGEN_MAX_ITERATIONS`, `CODEGEN_MAX_WALL_CLOCK_SECONDS`, `CODEGEN_AGENTS_MD`
-
----
-
-## Run tests
+## Tests
 
 After `python -m pip install -e ".[dev]"`:
 
@@ -99,17 +159,8 @@ After `python -m pip install -e ".[dev]"`:
 python -m pytest
 ```
 
-To run tests without installing the package as editable, ensure dependencies are installed and use the same interpreter; CLI subprocess tests expect `typer` (and siblings) on that interpreter.
-
 ---
 
 ## Maintaining this README
 
-When you complete a new story or phase, **update this file** with:
-
-1. Any new **install** or **dependency** steps.
-2. New **commands** or subcommands and a one-line description.
-3. New **configuration** keys or environment variables.
-
-That keeps “how to run” accurate for the next step of the roadmap.
-"# agent-codegen" 
+When behavior or flags change, update **Examples** and **How to run** so newcomers can copy-paste successfully. Full FR/NFR and roadmap stay in `docs/codegen_requirements.md` and `docs/codegen_stories.md`.
