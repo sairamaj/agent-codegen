@@ -40,6 +40,7 @@ class CodegenConfig(BaseModel):
     - CODEGEN_SHELL_TIMEOUT_SECONDS / CODEGEN_SHELL_MAX_OUTPUT_BYTES — integers.
     - CODEGEN_VERIFICATION_HOOKS — optional JSON array of shell command strings (post-edit hooks).
     - CODEGEN_VERIFICATION_FAILURE — ``fail`` or ``warn`` (default warn).
+    - CODEGEN_RESPECT_GITIGNORE — ``true`` / ``false`` (default true): skip ignored paths in list_dir/grep.
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -86,6 +87,26 @@ class CodegenConfig(BaseModel):
         default="warn",
         description="fail = tool result ok false if a hook fails; warn = report only.",
     )
+    # P2-02: gitignore-aware list_dir and grep (FR-CTX-5)
+    respect_gitignore: bool = Field(
+        default=True,
+        description="When true, list_dir and grep skip paths ignored by workspace .gitignore files.",
+    )
+
+    @field_validator("respect_gitignore", mode="before")
+    @classmethod
+    def validate_respect_gitignore(cls, v: Any) -> bool:
+        if v is None:
+            return True
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ("1", "true", "yes", "on"):
+                return True
+            if s in ("0", "false", "no", "off", ""):
+                return False
+        raise ValueError("respect_gitignore must be a boolean")
 
     @field_validator("verification_hooks", mode="before")
     @classmethod
@@ -149,6 +170,7 @@ class CodegenConfig(BaseModel):
             "shell_max_output_bytes": self.shell_max_output_bytes,
             "verification_hooks_count": len(self.verification_hooks),
             "verification_failure": self.verification_failure,
+            "respect_gitignore": self.respect_gitignore,
         }
 
     def _structured_log_public(self) -> str | None:
@@ -262,7 +284,8 @@ def load_config(
     structured_log (``stderr``, a path, or omit), session_audit (file path or omit),
     command_allowlist, command_denylist,
     command_require_approval, shell_timeout_seconds, shell_max_output_bytes,
-    verification_hooks (array of strings), verification_failure (fail or warn).
+    verification_hooks (array of strings), verification_failure (fail or warn),
+    respect_gitignore (boolean, default true).
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -333,6 +356,17 @@ def load_config(
                 f"(got {vf!r})"
             )
         merged["verification_failure"] = low
+
+    if os.environ.get("CODEGEN_RESPECT_GITIGNORE") is not None:
+        raw = os.environ.get("CODEGEN_RESPECT_GITIGNORE", "").strip().lower()
+        if raw in ("1", "true", "yes", "on"):
+            merged["respect_gitignore"] = True
+        elif raw in ("0", "false", "no", "off", ""):
+            merged["respect_gitignore"] = False
+        else:
+            raise CodegenConfigError(
+                "CODEGEN_RESPECT_GITIGNORE must be true/false (or 1/0, yes/no, on/off)"
+            )
 
     try:
         return CodegenConfig.model_validate(merged)

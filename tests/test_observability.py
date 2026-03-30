@@ -12,6 +12,7 @@ from codegen.observability import (
     normalize_structured_log_destination,
     open_structured_logger,
     sanitize_args_for_log,
+    tool_context_debug_fields,
     tool_result_outcome,
 )
 
@@ -53,6 +54,34 @@ def test_tool_result_outcome() -> None:
     r = tool_result_outcome('{"ok": false, "error": {"code": "PATH_OUTSIDE_WORKSPACE"}}')
     assert r["outcome"] == "error"
     assert r["error_code"] == "PATH_OUTSIDE_WORKSPACE"
+
+
+def test_tool_context_debug_fields_read_file() -> None:
+    raw = '{"ok": true, "path": "a.py", "lines": ["x", "y"]}'
+    d = tool_context_debug_fields("read_file", raw)
+    assert d["context_paths"] == ["a.py"]
+    assert d["context_line_snippets"] == 2
+
+
+def test_tool_context_debug_fields_skips_failed_tool() -> None:
+    assert tool_context_debug_fields("read_file", '{"ok": false}') == {}
+
+
+def test_tool_context_debug_fields_grep_counts() -> None:
+    raw = json.dumps(
+        {
+            "ok": True,
+            "matches": [
+                {"path": "a.py", "line": 1, "text": "x"},
+                {"path": "a.py", "line": 2, "text": "y"},
+                {"path": "b.py", "line": 1, "text": "z"},
+            ],
+        }
+    )
+    d = tool_context_debug_fields("grep", raw)
+    assert d["context_path_count"] == 2
+    assert d["context_match_snippets"] == 3
+    assert d["context_paths"] == ["a.py", "b.py"]
 
 
 def test_open_structured_logger_file(tmp_path: Path) -> None:

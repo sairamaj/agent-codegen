@@ -63,6 +63,66 @@ def tool_result_outcome(result_json: str) -> dict[str, Any]:
     return {"outcome": "ok"}
 
 
+# Cap paths listed in structured logs (P2-03, FR-CTX-8).
+_CONTEXT_PATHS_LOG_MAX = 32
+
+
+def tool_context_debug_fields(tool_name: str, result_json: str) -> dict[str, Any]:
+    """
+    Compact fields describing which workspace paths/snippets shaped tool output.
+
+    Emitted on ``tool.complete`` for successful read_file / list_dir / grep.
+    """
+    try:
+        d = json.loads(result_json)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(d, dict) or d.get("ok") is not True:
+        return {}
+
+    if tool_name == "read_file":
+        path = d.get("path")
+        lines = d.get("lines")
+        n = len(lines) if isinstance(lines, list) else 0
+        paths = [path] if isinstance(path, str) else []
+        return {
+            "context_paths": paths[:_CONTEXT_PATHS_LOG_MAX],
+            "context_path_count": len(paths),
+            "context_line_snippets": n,
+        }
+
+    if tool_name == "list_dir":
+        path = d.get("path")
+        entries = d.get("entries")
+        n = len(entries) if isinstance(entries, list) else 0
+        paths = [path] if isinstance(path, str) else []
+        return {
+            "context_paths": paths[:_CONTEXT_PATHS_LOG_MAX],
+            "context_path_count": len(paths),
+            "context_entries_listed": n,
+        }
+
+    if tool_name == "grep":
+        matches = d.get("matches")
+        if not isinstance(matches, list):
+            return {}
+        unique_paths: list[str] = []
+        for m in matches:
+            if not isinstance(m, dict):
+                continue
+            p = m.get("path")
+            if isinstance(p, str) and p not in unique_paths:
+                unique_paths.append(p)
+        log_paths = unique_paths[:_CONTEXT_PATHS_LOG_MAX]
+        return {
+            "context_paths": log_paths,
+            "context_path_count": len(unique_paths),
+            "context_match_snippets": len(matches),
+        }
+
+    return {}
+
+
 class StructuredLogger:
     """Append one JSON object per line; each record includes ``trace_id`` and ``session_id``."""
 

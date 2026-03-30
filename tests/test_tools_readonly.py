@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from codegen.config import CodegenConfig
 from codegen.tools_readonly import execute_tool
 
 
@@ -172,6 +173,76 @@ def test_list_dir_does_not_recurse_symlink_escape(tmp_path: Path) -> None:
     data = json.loads(raw)
     assert data["ok"] is True
     assert not any("nested.txt" in e for e in data["entries"])
+
+
+def test_grep_respects_gitignore_when_enabled(tmp_path: Path) -> None:
+    """P2-02: ignored files are skipped when respect_gitignore is on."""
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("secret_word\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("secret_word here\n", encoding="utf-8")
+    cfg = CodegenConfig(respect_gitignore=True)
+    raw = execute_tool(
+        tmp_path,
+        "grep",
+        json.dumps({"pattern": "secret_word", "path": "."}),
+        config=cfg,
+    )
+    data = json.loads(raw)
+    assert data["ok"] is True
+    paths = {m["path"] for m in data["matches"]}
+    assert "visible.txt" in paths
+    assert "ignored.txt" not in paths
+
+
+def test_grep_includes_ignored_when_respect_gitignore_off(tmp_path: Path) -> None:
+    (tmp_path / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+    (tmp_path / "ignored.txt").write_text("secret_word\n", encoding="utf-8")
+    (tmp_path / "visible.txt").write_text("x\n", encoding="utf-8")
+    cfg = CodegenConfig(respect_gitignore=False)
+    raw = execute_tool(
+        tmp_path,
+        "grep",
+        json.dumps({"pattern": "secret_word", "path": "."}),
+        config=cfg,
+    )
+    data = json.loads(raw)
+    assert data["ok"] is True
+    paths = {m["path"] for m in data["matches"]}
+    assert "ignored.txt" in paths
+
+
+def test_list_dir_respects_gitignore_when_enabled(tmp_path: Path) -> None:
+    """P2-02: ignored directories are omitted from listing."""
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    cfg = CodegenConfig(respect_gitignore=True)
+    raw = execute_tool(tmp_path, "list_dir", json.dumps({"path": ".", "depth": 2}), config=cfg)
+    data = json.loads(raw)
+    assert data["ok"] is True
+    assert not any(e == "build" or e.startswith("build/") for e in data["entries"])
+    assert any(e == "src" or e.startswith("src/") for e in data["entries"])
+
+
+def test_grep_nested_gitignore(tmp_path: Path) -> None:
+    """Patterns in a subdirectory .gitignore apply to paths under that directory."""
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / ".gitignore").write_text("inner.txt\n", encoding="utf-8")
+    (tmp_path / "pkg" / "inner.txt").write_text("needle\n", encoding="utf-8")
+    (tmp_path / "pkg" / "outer.txt").write_text("needle\n", encoding="utf-8")
+    cfg = CodegenConfig(respect_gitignore=True)
+    raw = execute_tool(
+        tmp_path,
+        "grep",
+        json.dumps({"pattern": "needle", "path": "pkg"}),
+        config=cfg,
+    )
+    data = json.loads(raw)
+    assert data["ok"] is True
+    paths = {m["path"] for m in data["matches"]}
+    assert "pkg/outer.txt" in paths
+    assert "pkg/inner.txt" not in paths
 
 
 def test_read_file_symlink_to_outside_rejected(tmp_path: Path) -> None:

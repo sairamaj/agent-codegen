@@ -40,7 +40,8 @@ app = typer.Typer(
         "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG, "
         "CODEGEN_STRUCTURED_LOG, CODEGEN_SESSION_AUDIT, CODEGEN_COMMAND_ALLOWLIST, "
         "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
-        "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE."
+        "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE, "
+        "CODEGEN_RESPECT_GITIGNORE."
     ),
 )
 
@@ -166,6 +167,8 @@ def info_cmd(
         console.print(f"{n} configured" if n else "(none)")
         console.print("[muted]verification_failure:[/muted] ", end="")
         console.print(summary["verification_failure"])
+        console.print("[muted]respect_gitignore:[/muted] ", end="")
+        console.print("on" if summary["respect_gitignore"] else "off")
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -181,6 +184,7 @@ def _build_system_prompt(
     project_rules: str | None,
     *,
     agent_mode: Literal["plan", "execute"] = "execute",
+    respect_gitignore: bool = True,
 ) -> str:
     tools_line = (
         "You have tools: read_file, list_dir, grep, apply_patch (structured edits), run_terminal_cmd. "
@@ -189,10 +193,16 @@ def _build_system_prompt(
         if agent_mode == "execute"
         else "You have read-only tools: read_file, list_dir, grep. "
     )
+    gi_line = (
+        "list_dir and grep skip paths matched by workspace .gitignore files (configurable)."
+        if respect_gitignore
+        else "list_dir and grep do not apply .gitignore filtering (respect_gitignore is off)."
+    )
     parts = [
         "You are Codegen, a workspace-scoped coding assistant.",
         f"Workspace root: {workspace_display}",
         tools_line + "Paths are relative to the workspace.",
+        gi_line,
         "Prefer tools over guessing file contents.",
         "If the task is ambiguous or missing critical detail (which path, API version, scope, or "
         "expected behavior), ask a short clarifying question before using apply_patch or "
@@ -295,6 +305,7 @@ def run_cmd(
         str(result.workspace),
         result.project_rules_text,
         agent_mode=agent_mode,
+        respect_gitignore=result.config.respect_gitignore,
     )
     trace_id = new_trace_id()
     session_id = trace_id
@@ -314,6 +325,7 @@ def run_cmd(
         )
 
     history: list[ChatCompletionMessageParam] = []
+    run_verbose: int = int(ctx.obj.get("verbose", 0))
 
     def _run_one(user_message: str) -> AgentRunResult:
         nonlocal history
@@ -328,6 +340,7 @@ def run_cmd(
             agent_mode=agent_mode,
             auto_approve=auto_approve,
             prior_messages=history if history else None,
+            verbose=run_verbose,
         )
         if interactive and out.exit_code == 0 and out.transcript_after_system:
             history = list(out.transcript_after_system)

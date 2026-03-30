@@ -12,6 +12,7 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.model == "gpt-4o-mini"
     assert cfg.base_url is None
     assert cfg.openai_api_key is None
+    assert cfg.respect_gitignore is True
 
 
 def test_load_from_toml(tmp_path: Path) -> None:
@@ -100,3 +101,15 @@ def test_session_audit_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     cfg = load_config(workspace=tmp_path)
     assert cfg.session_audit == str(tmp_path / "a.jsonl")
     assert cfg.redacted_summary()["session_audit"] == "file:a.jsonl"
+
+
+def test_respect_gitignore_toml(tmp_path: Path) -> None:
+    (tmp_path / "codegen.toml").write_text("respect_gitignore = false\n", encoding="utf-8")
+    cfg = load_config(workspace=tmp_path)
+    assert cfg.respect_gitignore is False
+
+
+def test_respect_gitignore_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEGEN_RESPECT_GITIGNORE", "false")
+    cfg = load_config(workspace=tmp_path)
+    assert cfg.respect_gitignore is False

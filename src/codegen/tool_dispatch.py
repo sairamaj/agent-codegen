@@ -20,3 +20,5 @@ class ToolDispatchContext:
     approval_callback: Callable[[str], bool] | None = None
     console: Console | None = None
     structured_logger: StructuredLogger | None = None
+    #: Global -v count from CLI; used for context trace lines after tools (P2-03).
+    verbose: int = 0

@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from codegen.command_policy import CommandPolicy, command_policy_from_config
 from codegen.config import CodegenConfig
+from codegen.gitignore_filter import GitignoreMatcher
 from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
 from codegen.tools_terminal import RUN_TERMINAL_CMD_TOOL_DEFINITION, run_terminal_cmd
 from codegen.tool_dispatch import ToolDispatchContext
@@ -129,6 +130,12 @@ _DEFAULT_GREP_MAX = 50
 _MAX_TOOL_JSON_CHARS = 80_000
 
 
+def _gitignore_matcher(workspace: Path, config: CodegenConfig | None) -> GitignoreMatcher | None:
+    if config is None or not config.respect_gitignore:
+        return None
+    return GitignoreMatcher(workspace)
+
+
 def _tool_error(code: str, message: str) -> str:
     return json.dumps({"ok": False, "error": {"code": code, "message": message}}, ensure_ascii=False)
 
@@ -196,7 +203,12 @@ def _read_file(workspace: Path, args: dict[str, Any]) -> str:
     return out
 
 
-def _list_dir(workspace: Path, args: dict[str, Any]) -> str:
+def _list_dir(
+    workspace: Path,
+    args: dict[str, Any],
+    *,
+    gitignore: GitignoreMatcher | None,
+) -> str:
     path = args.get("path")
     if not isinstance(path, str):
         return _tool_error("INVALID_ARGUMENT", "list_dir requires string path")
@@ -230,6 +242,8 @@ def _list_dir(workspace: Path, args: dict[str, Any]) -> str:
             if len(entries) >= cap:
                 truncated = True
                 return None
+            if gitignore is not None and gitignore.is_ignored(child):
+                continue
             rel = child.relative_to(workspace)
             entries.append(str(rel).replace("\\", "/"))
             if child.is_dir() and current_depth < d:
@@ -252,7 +266,50 @@ def _list_dir(workspace: Path, args: dict[str, Any]) -> str:
     return out
 
 
-def _grep(workspace: Path, args: dict[str, Any]) -> str:
+def _grep_collect_files(
+    workspace: Path,
+    scope: Path,
+    gitignore: GitignoreMatcher | None,
+) -> list[Path]:
+    """Text files under scope, skipping symlink escapes and optional gitignore."""
+
+    out: list[Path] = []
+
+    def walk(dir_path: Path) -> None:
+        if not resolved_path_is_under_workspace(workspace, dir_path):
+            return
+        if gitignore is not None and gitignore.is_ignored(dir_path):
+            return
+        try:
+            names = sorted(dir_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except OSError:
+            return
+        for child in names:
+            if not resolved_path_is_under_workspace(workspace, child):
+                continue
+            if gitignore is not None and gitignore.is_ignored(child):
+                continue
+            if child.is_file():
+                out.append(child)
+            elif child.is_dir():
+                walk(child)
+
+    if scope.is_file():
+        if gitignore is None or not gitignore.is_ignored(scope):
+            return [scope]
+        return []
+    if scope.is_dir():
+        walk(scope)
+        return out
+    return []
+
+
+def _grep(
+    workspace: Path,
+    args: dict[str, Any],
+    *,
+    gitignore: GitignoreMatcher | None,
+) -> str:
     pattern = args.get("pattern")
     path = args.get("path", ".")
     max_matches = args.get("max_matches", _DEFAULT_GREP_MAX)
@@ -293,13 +350,12 @@ def _grep(workspace: Path, args: dict[str, Any]) -> str:
                 return
 
     if scope.is_file():
-        scan_file(scope)
+        files = _grep_collect_files(workspace, scope, gitignore)
+        for fp in files:
+            scan_file(fp)
     elif scope.is_dir():
-        for fp in sorted(scope.rglob("*")):
-            if not fp.is_file():
-                continue
-            if not resolved_path_is_under_workspace(workspace, fp):
-                continue
+        files = _grep_collect_files(workspace, scope, gitignore)
+        for fp in sorted(files, key=lambda p: p.as_posix().lower()):
             scan_file(fp)
             if truncated:
                 break
@@ -340,12 +396,14 @@ def execute_tool(
             "This tool is disabled in plan mode (read-only). Use execute mode to apply patches or run shell.",
         )
 
+    gi = _gitignore_matcher(workspace, config)
+
     if name == "read_file":
         return _read_file(workspace, args)
     if name == "list_dir":
-        return _list_dir(workspace, args)
+        return _list_dir(workspace, args, gitignore=gi)
     if name == "grep":
-        return _grep(workspace, args)
+        return _grep(workspace, args, gitignore=gi)
     if name == "apply_patch":
         raw = apply_patch(workspace, args)
         if config is None or not config.verification_hooks:

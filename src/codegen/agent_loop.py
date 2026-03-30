@@ -19,7 +19,12 @@ from codegen.command_policy import command_policy_from_config
 from codegen.config import CodegenConfig
 from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
-from codegen.observability import StructuredLogger, sanitize_args_for_log, tool_result_outcome
+from codegen.observability import (
+    StructuredLogger,
+    sanitize_args_for_log,
+    tool_context_debug_fields,
+    tool_result_outcome,
+)
 from codegen.session_audit import SessionAuditWriter
 from codegen.tool_dispatch import ToolDispatchContext
 from codegen.tools_readonly import execute_tool, tool_definitions_for_mode
@@ -59,6 +64,26 @@ def prompt_for_command_approval(console: Console, command: str) -> bool:
     except EOFError:
         return False
     return line in ("y", "yes")
+
+
+def _context_trace_line(tool_name: str, fields: dict[str, Any]) -> str | None:
+    """One-line summary for -v (P2-03); returns None when nothing to show."""
+    if not fields:
+        return None
+    paths = fields.get("context_paths") or []
+    if tool_name == "read_file":
+        n = int(fields.get("context_line_snippets", 0))
+        p = paths[0] if paths else "?"
+        return f"read_file → {n} line(s) from {p}"
+    if tool_name == "list_dir":
+        n = int(fields.get("context_entries_listed", 0))
+        p = paths[0] if paths else "?"
+        return f"list_dir → {n} entr(y/ies) under {p}"
+    if tool_name == "grep":
+        m = int(fields.get("context_match_snippets", 0))
+        u = int(fields.get("context_path_count", 0))
+        return f"grep → {m} match snippet(s) across {u} file(s)"
+    return None
 
 
 def _approval_callback_for_run(*, auto_approve: bool, console: Console) -> Callable[[str], bool]:
@@ -165,6 +190,7 @@ def run_agent_task(
     agent_mode: Literal["plan", "execute"] = "execute",
     auto_approve: bool = False,
     prior_messages: Sequence[ChatCompletionMessageParam] | None = None,
+    verbose: int = 0,
 ) -> AgentRunResult:
     """
     Run the model with tools until a final assistant message or a limit.
@@ -176,6 +202,8 @@ def run_agent_task(
     Pass ``prior_messages`` (must not include the system message) to continue a conversation;
     ``transcript_after_system`` on the result is the full suffix to pass as the next
     ``prior_messages`` after a successful turn.
+
+    ``verbose >= 1`` prints a short context trace after read-only tools (P2-03).
     """
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
@@ -229,6 +257,7 @@ def run_agent_task(
         approval_callback=_approval_callback_for_run(auto_approve=auto_approve, console=console),
         console=console,
         structured_logger=structured_logger,
+        verbose=verbose,
     )
 
     tools_for_run = tool_definitions_for_mode(agent_mode)
@@ -372,14 +401,20 @@ def run_agent_task(
                         config=config,
                     )
                     duration_ms = int((time.monotonic() - t_tool) * 1000)
+                    outcome = tool_result_outcome(result)
+                    ctx_dbg = tool_context_debug_fields(name, result)
                     if structured_logger is not None:
-                        outcome = tool_result_outcome(result)
                         structured_logger.emit(
                             "tool.complete",
                             tool_name=name,
                             duration_ms=duration_ms,
                             **outcome,
+                            **ctx_dbg,
                         )
+                    if tool_dispatch.verbose >= 1:
+                        line = _context_trace_line(name, ctx_dbg)
+                        if line:
+                            console.print(f"[muted]context[/muted] {line}")
                     if session_audit is not None:
                         session_audit.tool_record(
                             tool_call_id=tid,
