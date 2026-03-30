@@ -86,6 +86,44 @@ codegen -v run "Trace which tools run; keep the task small."
 codegen -vv run "Even more detail for debugging."
 ```
 
+### Web fetch (optional `web_fetch` tool)
+
+**Off by default** so the agent does not open network connections unless you opt in. When enabled, the model can call **`web_fetch`** for bounded **HTTP GET** requests to **public** `http://` or `https://` URLs (size and timeout limits apply; localhost and private IPs are rejected).
+
+**1. Enable** in the workspace **`codegen.toml`** or **`.codegen.toml`**:
+
+```toml
+web_fetch_enabled = true
+# optional (defaults are usually enough):
+# web_fetch_max_bytes = 262144
+# web_fetch_timeout_seconds = 30
+```
+
+**Or** set the environment variable (e.g. in the shell or `.env`):
+
+```bash
+export CODEGEN_WEB_FETCH_ENABLED=true
+# optional:
+# export CODEGEN_WEB_FETCH_MAX_BYTES=524288
+# export CODEGEN_WEB_FETCH_TIMEOUT_SECONDS=45
+```
+
+**2. Confirm** it is on:
+
+```bash
+codegen -w . info
+```
+
+You should see `web_fetch: on (...)` in the summary.
+
+**3. Run** tasks that ask the agent to read public pages (it will use `web_fetch` when the task needs the web):
+
+```bash
+codegen run --mode plan "Fetch https://example.com and report the page title."
+codegen run "Summarize the first screen of text from https://docs.python.org/3/tutorial/ for a beginner."
+codegen run "What version string appears on the PyPI JSON for the 'httpx' project? Use https://pypi.org/pypi/httpx/json"
+```
+
 ### Module invocation (same as the `codegen` script after install)
 
 ```bash
