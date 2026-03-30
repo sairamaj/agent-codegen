@@ -40,7 +40,7 @@ app = typer.Typer(
         "CODEGEN_MAX_ITERATIONS, CODEGEN_MAX_WALL_CLOCK_SECONDS, CODEGEN_AGENTS_MD, CODEGEN_CONFIG, "
         "CODEGEN_STRUCTURED_LOG, CODEGEN_SESSION_AUDIT, CODEGEN_COMMAND_ALLOWLIST, "
         "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
-        "CODEGEN_SHELL_MAX_OUTPUT_BYTES."
+        "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE."
     ),
 )
 
@@ -161,6 +161,11 @@ def info_cmd(
         console.print(summary["structured_log"] or "(off)")
         console.print("[muted]session_audit:[/muted] ", end="")
         console.print(summary["session_audit"] or "(off)")
+        console.print("[muted]verification_hooks:[/muted] ", end="")
+        n = summary["verification_hooks_count"]
+        console.print(f"{n} configured" if n else "(none)")
+        console.print("[muted]verification_failure:[/muted] ", end="")
+        console.print(summary["verification_failure"])
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -179,6 +184,8 @@ def _build_system_prompt(
 ) -> str:
     tools_line = (
         "You have tools: read_file, list_dir, grep, apply_patch (structured edits), run_terminal_cmd. "
+        "If the workspace config lists verification_hooks, they run automatically after a fully "
+        "successful apply_patch; check the verification field in the tool result (policy fail vs warn). "
         if agent_mode == "execute"
         else "You have read-only tools: read_file, list_dir, grep. "
     )

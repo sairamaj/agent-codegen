@@ -12,6 +12,7 @@ from codegen.config import CodegenConfig
 from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
 from codegen.tools_terminal import RUN_TERMINAL_CMD_TOOL_DEFINITION, run_terminal_cmd
 from codegen.tool_dispatch import ToolDispatchContext
+from codegen.verification_hooks import attach_verification_to_patch_result, run_verification_hooks
 from codegen.workspace_paths import (
     PathOutsideWorkspaceError,
     resolved_path_is_under_workspace,
@@ -346,7 +347,29 @@ def execute_tool(
     if name == "grep":
         return _grep(workspace, args)
     if name == "apply_patch":
-        return apply_patch(workspace, args)
+        raw = apply_patch(workspace, args)
+        if config is None or not config.verification_hooks:
+            return raw
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(parsed, dict) or parsed.get("ok") is not True:
+            return raw
+        hook_results, verification_ok = run_verification_hooks(
+            workspace,
+            config.verification_hooks,
+            timeout_seconds=config.shell_timeout_seconds,
+            max_output_bytes=config.shell_max_output_bytes,
+            console=ctx.console,
+        )
+        return attach_verification_to_patch_result(
+            raw,
+            commands_were_configured=True,
+            hook_results=hook_results,
+            verification_ok=verification_ok,
+            policy=config.verification_failure,
+        )
     if name == "run_terminal_cmd":
         if ctx.policy is not None:
             pol = ctx.policy

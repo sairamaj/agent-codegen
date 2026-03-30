@@ -28,6 +28,7 @@ CODEGEN_THEME = Theme(
         "error": "bold red",
         "warn": "yellow",
         "muted": "dim",
+        "stderr": "red",
     }
 )
 

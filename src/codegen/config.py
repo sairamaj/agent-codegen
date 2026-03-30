@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import tomllib
 from dotenv import load_dotenv
@@ -37,6 +38,8 @@ class CodegenConfig(BaseModel):
     - CODEGEN_COMMAND_DENYLIST — comma-separated patterns; set to empty string ``""`` for no deny rules.
     - CODEGEN_COMMAND_REQUIRE_APPROVAL — comma-separated patterns; empty string for none.
     - CODEGEN_SHELL_TIMEOUT_SECONDS / CODEGEN_SHELL_MAX_OUTPUT_BYTES — integers.
+    - CODEGEN_VERIFICATION_HOOKS — optional JSON array of shell command strings (post-edit hooks).
+    - CODEGEN_VERIFICATION_FAILURE — ``fail`` or ``warn`` (default warn).
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -74,6 +77,43 @@ class CodegenConfig(BaseModel):
     )
     shell_timeout_seconds: int = Field(default=120, ge=1, le=86_400)
     shell_max_output_bytes: int = Field(default=32_768, ge=1024, le=2_000_000)
+    # P2-01: post-edit verification (FR-VER-1–3)
+    verification_hooks: list[str] = Field(
+        default_factory=list,
+        description="Shell commands run after a fully successful apply_patch, workspace cwd.",
+    )
+    verification_failure: Literal["fail", "warn"] = Field(
+        default="warn",
+        description="fail = tool result ok false if a hook fails; warn = report only.",
+    )
+
+    @field_validator("verification_hooks", mode="before")
+    @classmethod
+    def validate_verification_hooks(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("verification_hooks must be a list of strings")
+        out: list[str] = []
+        for x in v:
+            if not isinstance(x, str):
+                raise ValueError("verification_hooks must be a list of strings")
+            s = x.strip()
+            if s:
+                out.append(s)
+        if len(out) > 64:
+            raise ValueError("verification_hooks: at most 64 entries")
+        return out
+
+    @field_validator("verification_failure", mode="before")
+    @classmethod
+    def validate_verification_failure(cls, v: Any) -> str:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return "warn"
+        s = str(v).strip().lower()
+        if s not in ("fail", "warn"):
+            raise ValueError("verification_failure must be 'fail' or 'warn'")
+        return s
 
     @field_validator("base_url")
     @classmethod
@@ -107,6 +147,8 @@ class CodegenConfig(BaseModel):
             ),
             "shell_timeout_seconds": self.shell_timeout_seconds,
             "shell_max_output_bytes": self.shell_max_output_bytes,
+            "verification_hooks_count": len(self.verification_hooks),
+            "verification_failure": self.verification_failure,
         }
 
     def _structured_log_public(self) -> str | None:
@@ -219,7 +261,8 @@ def load_config(
     TOML keys (all optional): model, base_url, max_iterations, max_wall_clock_seconds, agents_md,
     structured_log (``stderr``, a path, or omit), session_audit (file path or omit),
     command_allowlist, command_denylist,
-    command_require_approval, shell_timeout_seconds, shell_max_output_bytes.
+    command_require_approval, shell_timeout_seconds, shell_max_output_bytes,
+    verification_hooks (array of strings), verification_failure (fail or warn).
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -270,6 +313,26 @@ def load_config(
                 merged[key] = int(raw)
             except ValueError as e:
                 raise CodegenConfigError(f"{env_key} must be an integer, got {raw!r}") from e
+
+    if (vh := os.environ.get("CODEGEN_VERIFICATION_HOOKS", "").strip()):
+        try:
+            parsed = json.loads(vh)
+        except json.JSONDecodeError as e:
+            raise CodegenConfigError(
+                f"CODEGEN_VERIFICATION_HOOKS must be a JSON array of strings: {e}"
+            ) from e
+        if not isinstance(parsed, list) or not all(isinstance(x, str) for x in parsed):
+            raise CodegenConfigError("CODEGEN_VERIFICATION_HOOKS must be a JSON array of strings")
+        merged["verification_hooks"] = parsed
+
+    if (vf := os.environ.get("CODEGEN_VERIFICATION_FAILURE", "").strip()):
+        low = vf.lower()
+        if low not in ("fail", "warn"):
+            raise CodegenConfigError(
+                "CODEGEN_VERIFICATION_FAILURE must be 'fail' or 'warn' "
+                f"(got {vf!r})"
+            )
+        merged["verification_failure"] = low
 
     try:
         return CodegenConfig.model_validate(merged)

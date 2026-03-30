@@ -4,6 +4,21 @@ Living log of what is implemented in this repo versus [docs/codegen_stories.md](
 
 ---
 
+## 2026-03-29 — Epic P2-E1: Verification
+
+**Stories**
+
+| Story | Status | Notes |
+|-------|--------|--------|
+| P2-01 | Done | **Post-edit hooks** after a **fully successful** `apply_patch` (all files `ok`): `verification_hooks` (shell commands, workspace cwd) + `verification_failure` `fail` \| `warn` in TOML / env. Hook **stdout** (`muted`), **stderr** (`stderr` / red), spawn/timeout errors on console. Tool JSON gains `verification` (`ok`, `policy`, `hooks[]` with exit_code, stdout/stderr, truncation flags). **`fail`**: top-level `ok: false` and `error.code` `VERIFICATION_FAILED` while `files` still reflects the patch. **`warn`**: patch stays `ok: true`; hooks reported under `verification`. Uses same timeout/output caps as shell tool. Module: `codegen.verification_hooks`; wired in `tools_readonly.execute_tool`. System prompt + `apply_patch` description + `codegen info` mention hooks. |
+
+**Code / tests**
+
+- `codegen.verification_hooks`, `codegen.config` (`verification_hooks`, `verification_failure`, `CODEGEN_VERIFICATION_*`), `codegen.tools_readonly`, `codegen.console` (`stderr` style), `codegen.tools_patch` (tool description), `codegen.cli` (prompt + info + help), `.env.example`.
+- Tests: `tests/test_verification_hooks.py`.
+
+---
+
 ## 2026-03-29 — Epic P1-E1: Patches and edits
 
 **Stories**

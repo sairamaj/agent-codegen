@@ -396,7 +396,10 @@ APPLY_PATCH_TOOL_DEFINITION: dict[str, Any] = {
             "created as needed. Multi-file: not atomic across files; entries run in "
             "array order and failures do not stop later entries; see top-level ok, partial, "
             "and per-file results. On mismatch, errors include line hints and context_preview; "
-            "call read_file on the same path to refresh old_text before retry."
+            "call read_file on the same path to refresh old_text before retry. "
+            "When codegen.toml configures verification_hooks, they run after a fully successful "
+            "apply (all files ok); results appear in verification and may set ok=false if "
+            "verification_failure is fail."
         ),
         "parameters": {
             "type": "object",
