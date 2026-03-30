@@ -41,6 +41,8 @@ class CodegenConfig(BaseModel):
     - CODEGEN_VERIFICATION_HOOKS — optional JSON array of shell command strings (post-edit hooks).
     - CODEGEN_VERIFICATION_FAILURE — ``fail`` or ``warn`` (default warn).
     - CODEGEN_RESPECT_GITIGNORE — ``true`` / ``false`` (default true): skip ignored paths in list_dir/grep.
+    - CODEGEN_SESSION_FILE — optional session path or name for resume (P2-04).
+    - CODEGEN_MAX_HISTORY_CHARS — integer budget for prior history before compaction (P2-05).
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -91,6 +93,17 @@ class CodegenConfig(BaseModel):
     respect_gitignore: bool = Field(
         default=True,
         description="When true, list_dir and grep skip paths ignored by workspace .gitignore files.",
+    )
+    # P2-04 / P2-05: session file + history budget (FR-SESS-2, FR-SESS-3)
+    session_file: str | None = Field(
+        default=None,
+        description="Optional session backing store: path or session name under .codegen/sessions/.",
+    )
+    max_history_chars: int = Field(
+        default=80_000,
+        ge=512,
+        le=2_000_000,
+        description="Approximate max chars for prior messages before compaction (JSON-sized estimate).",
     )
 
     @field_validator("respect_gitignore", mode="before")
@@ -171,6 +184,8 @@ class CodegenConfig(BaseModel):
             "verification_hooks_count": len(self.verification_hooks),
             "verification_failure": self.verification_failure,
             "respect_gitignore": self.respect_gitignore,
+            "session_file": self._session_file_public(),
+            "max_history_chars": self.max_history_chars,
         }
 
     def _structured_log_public(self) -> str | None:
@@ -191,6 +206,16 @@ class CodegenConfig(BaseModel):
         if n is None:
             return None
         return f"file:{Path(n).name}"
+
+    def _session_file_public(self) -> str | None:
+        from codegen.session_persist import normalize_session_file_path
+
+        n = normalize_session_file_path(self.session_file)
+        if n is None:
+            return None
+        if "/" in n or "\\" in n or n.lower().endswith(".json"):
+            return f"file:{Path(n).name}"
+        return f"name:{n}"
 
 
 def _read_toml_file(path: Path) -> dict[str, Any]:
@@ -285,7 +310,8 @@ def load_config(
     command_allowlist, command_denylist,
     command_require_approval, shell_timeout_seconds, shell_max_output_bytes,
     verification_hooks (array of strings), verification_failure (fail or warn),
-    respect_gitignore (boolean, default true).
+    respect_gitignore (boolean, default true),
+    session_file (path or session name), max_history_chars (integer).
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)
@@ -367,6 +393,17 @@ def load_config(
             raise CodegenConfigError(
                 "CODEGEN_RESPECT_GITIGNORE must be true/false (or 1/0, yes/no, on/off)"
             )
+
+    if (sf := os.environ.get("CODEGEN_SESSION_FILE", "").strip()):
+        merged["session_file"] = sf
+
+    if (mh := os.environ.get("CODEGEN_MAX_HISTORY_CHARS", "").strip()):
+        try:
+            merged["max_history_chars"] = int(mh)
+        except ValueError as e:
+            raise CodegenConfigError(
+                f"CODEGEN_MAX_HISTORY_CHARS must be an integer, got {mh!r}"
+            ) from e
 
     try:
         return CodegenConfig.model_validate(merged)

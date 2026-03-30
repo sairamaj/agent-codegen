@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from codegen.rules import load_project_rules, resolve_rules_path
+from codegen.rules import load_project_rules, resolve_rules_path, rules_content_sha256
 
 
 def test_load_missing_agents_md(tmp_path: Path) -> None:
@@ -20,6 +20,12 @@ def test_relative_path_under_workspace(tmp_path: Path) -> None:
     sub.mkdir()
     (sub / "rules.md").write_text("x", encoding="utf-8")
     assert load_project_rules(tmp_path, "docs/rules.md") == "x"
+
+
+def test_rules_content_sha256() -> None:
+    assert rules_content_sha256(None) is None
+    h = rules_content_sha256("hello")
+    assert h is not None and len(h) == 64
 
 
 def test_resolve_absolute(tmp_path: Path) -> None:

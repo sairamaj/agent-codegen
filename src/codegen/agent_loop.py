@@ -17,6 +17,7 @@ from rich.console import Console
 
 from codegen.command_policy import command_policy_from_config
 from codegen.config import CodegenConfig
+from codegen.history_compaction import compact_prior_messages, estimate_messages_chars
 from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
 from codegen.observability import (
@@ -191,6 +192,7 @@ def run_agent_task(
     auto_approve: bool = False,
     prior_messages: Sequence[ChatCompletionMessageParam] | None = None,
     verbose: int = 0,
+    project_rules_sha256: str | None = None,
 ) -> AgentRunResult:
     """
     Run the model with tools until a final assistant message or a limit.
@@ -204,6 +206,7 @@ def run_agent_task(
     ``prior_messages`` after a successful turn.
 
     ``verbose >= 1`` prints a short context trace after read-only tools (P2-03).
+    ``project_rules_sha256`` is emitted on ``run.start`` for audit metadata (P2-06).
     """
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
@@ -213,34 +216,6 @@ def run_agent_task(
     if proxy_err is not None:
         console.print(f"[error]{proxy_err}[/error]")
         return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="invalid_proxy_env")
-
-    def _finish(
-        exit_code: int,
-        stop_reason: str,
-        *,
-        iterations_used: int,
-    ) -> AgentRunResult:
-        if structured_logger is not None:
-            structured_logger.emit(
-                "run.end",
-                exit_code=exit_code,
-                stop_reason=stop_reason,
-                iterations_used=iterations_used,
-            )
-        if session_audit is not None and audit_started:
-            session_audit.run_end(
-                exit_code=exit_code,
-                stop_reason=stop_reason,
-                iterations_used=iterations_used,
-                tool_calls_count=len(all_records),
-            )
-        return AgentRunResult(
-            exit_code=exit_code,
-            iterations_used=iterations_used,
-            stop_reason=stop_reason,
-            tool_calls=all_records,
-            transcript_after_system=deepcopy(messages[1:]),
-        )
 
     console.print("[muted]user[/muted] ", end="")
     console.print(format_user_task_preview(user_message), style="user")
@@ -271,11 +246,49 @@ def run_agent_task(
         )
 
     prior = list(prior_messages) if prior_messages else []
+    prior_chars_before = estimate_messages_chars(prior)
+    prior_compact, did_compact = compact_prior_messages(
+        prior,
+        max_chars=config.max_history_chars,
+    )
+    # API messages may use compacted prior; transcript retains full history for resume (P2-04/05).
     messages: list[ChatCompletionMessageParam] = [
         {"role": "system", "content": system_prompt},
+        *prior_compact,
+        {"role": "user", "content": user_message},
+    ]
+    transcript_full: list[ChatCompletionMessageParam] = [
         *prior,
         {"role": "user", "content": user_message},
     ]
+
+    def _finish(
+        exit_code: int,
+        stop_reason: str,
+        *,
+        iterations_used: int,
+    ) -> AgentRunResult:
+        if structured_logger is not None:
+            structured_logger.emit(
+                "run.end",
+                exit_code=exit_code,
+                stop_reason=stop_reason,
+                iterations_used=iterations_used,
+            )
+        if session_audit is not None and audit_started:
+            session_audit.run_end(
+                exit_code=exit_code,
+                stop_reason=stop_reason,
+                iterations_used=iterations_used,
+                tool_calls_count=len(all_records),
+            )
+        return AgentRunResult(
+            exit_code=exit_code,
+            iterations_used=iterations_used,
+            stop_reason=stop_reason,
+            tool_calls=all_records,
+            transcript_after_system=deepcopy(transcript_full),
+        )
 
     all_records: list[ToolCallRecord] = []
     iterations = 0
@@ -291,7 +304,16 @@ def run_agent_task(
             max_wall_clock_seconds=config.max_wall_clock_seconds,
             agent_mode=agent_mode,
             auto_approve_shell=auto_approve,
+            project_rules_sha256=project_rules_sha256,
+            max_history_chars=config.max_history_chars,
         )
+        if did_compact:
+            structured_logger.emit(
+                "history.compact",
+                prior_chars_before=prior_chars_before,
+                prior_chars_after=estimate_messages_chars(prior_compact),
+                max_history_chars=config.max_history_chars,
+            )
     if session_audit is not None:
         session_audit.run_start(
             workspace=str(workspace),
@@ -376,6 +398,7 @@ def run_agent_task(
                     "tool_calls": tool_calls_list,
                 }
                 messages.append(assistant_msg)  # type: ignore[arg-type]
+                transcript_full.append(assistant_msg)  # type: ignore[arg-type]
 
                 for tc in tool_calls_list:
                     fn = tc.get("function") or {}
@@ -424,17 +447,19 @@ def run_agent_task(
                             duration_ms=duration_ms,
                         )
                     all_records.append(ToolCallRecord(name=name, arguments=raw_args, result=result))
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tid,
-                            "content": result,
-                        }
-                    )
+                    tool_msg: ChatCompletionMessageParam = {
+                        "role": "tool",
+                        "tool_call_id": tid,
+                        "content": result,
+                    }
+                    messages.append(tool_msg)
+                    transcript_full.append(tool_msg)
                 continue
 
             # Final assistant turn (or stop without tools) — keep in transcript for follow-up turns.
-            messages.append({"role": "assistant", "content": assistant_text})
+            final_asst: ChatCompletionMessageParam = {"role": "assistant", "content": assistant_text}
+            messages.append(final_asst)
+            transcript_full.append(final_asst)
             return _finish(0, finish_reason or "stop", iterations_used=iterations)
     finally:
         if own_client:

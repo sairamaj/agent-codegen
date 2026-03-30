@@ -20,7 +20,9 @@ from codegen.observability import (
     normalize_structured_log_destination,
     open_structured_logger,
 )
+from codegen.rules import rules_content_sha256
 from codegen.session_audit import normalize_session_audit_path, open_session_audit
+from codegen.session_persist import load_session, resolve_session_storage_path, save_session
 from codegen.workspace import WorkspaceError
 
 app = typer.Typer(
@@ -41,7 +43,7 @@ app = typer.Typer(
         "CODEGEN_STRUCTURED_LOG, CODEGEN_SESSION_AUDIT, CODEGEN_COMMAND_ALLOWLIST, "
         "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
         "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE, "
-        "CODEGEN_RESPECT_GITIGNORE."
+        "CODEGEN_RESPECT_GITIGNORE, CODEGEN_SESSION_FILE, CODEGEN_MAX_HISTORY_CHARS."
     ),
 )
 
@@ -169,6 +171,10 @@ def info_cmd(
         console.print(summary["verification_failure"])
         console.print("[muted]respect_gitignore:[/muted] ", end="")
         console.print("on" if summary["respect_gitignore"] else "off")
+        console.print("[muted]session_file:[/muted] ", end="")
+        console.print(summary["session_file"] or "(off)")
+        console.print("[muted]max_history_chars:[/muted] ", end="")
+        console.print(str(summary["max_history_chars"]))
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -275,6 +281,16 @@ def run_cmd(
             help="Prompt for tasks until you type exit or quit (requires a TTY).",
         ),
     ] = False,
+    session: Annotated[
+        Optional[str],
+        typer.Option(
+            "--session",
+            help=(
+                "Session backing store: path to a .json file, or a name stored under "
+                "``.codegen/sessions/<name>.json`` in the workspace. Overrides CODEGEN_SESSION_FILE."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run the agent: OpenAI drives tools; output is streamed."""
     console = make_console()
@@ -308,7 +324,26 @@ def run_cmd(
         respect_gitignore=result.config.respect_gitignore,
     )
     trace_id = new_trace_id()
-    session_id = trace_id
+    session_path = resolve_session_storage_path(
+        workspace=result.workspace,
+        session_arg=session,
+        config_path=result.config.session_file,
+    )
+    persisted = load_session(session_path) if session_path is not None else None
+    if persisted is not None:
+        ws_saved = Path(persisted.workspace).resolve()
+        if ws_saved != result.workspace.resolve():
+            console.print(
+                "[error]Session file workspace does not match current -w workspace.[/error]\n"
+                f"[muted]Session has:[/muted] {ws_saved}\n"
+                f"[muted]Current:[/muted] {result.workspace.resolve()}",
+            )
+            raise typer.Exit(2)
+        history = persisted.transcript()
+        session_id = persisted.session_id
+    else:
+        history = []
+        session_id = trace_id
     log_dest = normalize_structured_log_destination(result.config.structured_log)
     audit_path = normalize_session_audit_path(result.config.session_audit)
     close_log: Callable[[], None] | None = None
@@ -324,8 +359,19 @@ def run_cmd(
             audit_path, trace_id=trace_id, session_id=session_id
         )
 
-    history: list[ChatCompletionMessageParam] = []
+    rules_hash = rules_content_sha256(result.project_rules_text)
     run_verbose: int = int(ctx.obj.get("verbose", 0))
+
+    def _persist_if_needed(out: AgentRunResult) -> None:
+        if session_path is None or out.exit_code != 0:
+            return
+        save_session(
+            session_path,
+            session_id=session_id,
+            workspace=result.workspace,
+            messages=out.transcript_after_system,
+            created_at=persisted.created_at if persisted else None,
+        )
 
     def _run_one(user_message: str) -> AgentRunResult:
         nonlocal history
@@ -341,9 +387,11 @@ def run_cmd(
             auto_approve=auto_approve,
             prior_messages=history if history else None,
             verbose=run_verbose,
+            project_rules_sha256=rules_hash,
         )
-        if interactive and out.exit_code == 0 and out.transcript_after_system:
+        if out.exit_code == 0 and out.transcript_after_system:
             history = list(out.transcript_after_system)
+            _persist_if_needed(out)
         return out
 
     try:

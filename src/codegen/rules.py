@@ -8,7 +8,15 @@ the agent loop should inject ``project_rules_text`` ahead of the user task when 
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+
+
+def rules_content_sha256(text: str | None) -> str | None:
+    """SHA-256 hex digest of project rules for audit metadata (P2-06, FR-RULE-3)."""
+    if text is None:
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def resolve_rules_path(workspace: Path, agents_md: str) -> Path:
