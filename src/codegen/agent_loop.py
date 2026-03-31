@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -18,6 +19,7 @@ from rich.console import Console
 from codegen.command_policy import command_policy_from_config
 from codegen.config import CodegenConfig
 from codegen.history_compaction import compact_prior_messages, estimate_messages_chars
+from codegen.mcp_runtime import close_mcp_runtime, connect_mcp_runtime
 from codegen.http_env import proxy_environment_error_message
 from codegen.console import format_user_task_preview, redact_secrets_in_text, redact_tool_args_display
 from codegen.observability import (
@@ -89,6 +91,9 @@ def _context_trace_line(tool_name: str, fields: dict[str, Any]) -> str | None:
         paths = fields.get("context_paths") or []
         u = paths[0] if paths else "?"
         return f"web_fetch → {b} byte(s) from {u}"
+    if tool_name.startswith("mcp__"):
+        srv = fields.get("context_mcp_server") or "?"
+        return f"MCP → {srv} ({tool_name})"
     return None
 
 
@@ -213,6 +218,9 @@ def run_agent_task(
     ``verbose >= 1`` prints a short context trace after read-only tools (P2-03).
     ``project_rules_sha256`` is emitted on ``run.start`` for audit metadata (P2-06).
     """
+    mcp_runtime = None
+    asyncio_loop: asyncio.AbstractEventLoop | None = None
+
     if not (config.openai_api_key or "").strip():
         console.print("[error]OPENAI_API_KEY is not set.[/error]")
         return AgentRunResult(exit_code=2, iterations_used=0, stop_reason="missing_api_key")
@@ -240,7 +248,27 @@ def run_agent_task(
         verbose=verbose,
     )
 
-    tools_for_run = tool_definitions_for_mode(agent_mode, config=config)
+    if config.mcp_servers:
+        asyncio_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(asyncio_loop)
+        try:
+            mcp_runtime = asyncio_loop.run_until_complete(
+                connect_mcp_runtime(workspace, list(config.mcp_servers))
+            )
+        except Exception as e:
+            if structured_logger is not None:
+                structured_logger.emit(
+                    "mcp.connect_failed",
+                    error=str(e),
+                    mcp_servers_count=len(config.mcp_servers),
+                )
+            console.print(f"[warn]MCP server startup failed; continuing without MCP tools: {e}[/warn]")
+            asyncio.set_event_loop(None)
+            asyncio_loop.close()
+            asyncio_loop = None
+            mcp_runtime = None
+
+    tools_for_run = tool_definitions_for_mode(agent_mode, config=config, mcp_runtime=mcp_runtime)
 
     own_client = client is None
     if client is None:
@@ -311,6 +339,7 @@ def run_agent_task(
             auto_approve_shell=auto_approve,
             project_rules_sha256=project_rules_sha256,
             max_history_chars=config.max_history_chars,
+            mcp_servers_count=len(config.mcp_servers),
         )
         if did_compact:
             structured_logger.emit(
@@ -427,6 +456,7 @@ def run_agent_task(
                         raw_args,
                         dispatch=tool_dispatch,
                         config=config,
+                        mcp_runtime=mcp_runtime,
                     )
                     duration_ms = int((time.monotonic() - t_tool) * 1000)
                     outcome = tool_result_outcome(result)
@@ -469,3 +499,10 @@ def run_agent_task(
     finally:
         if own_client:
             client.close()
+        if asyncio_loop is not None:
+            try:
+                if mcp_runtime is not None:
+                    asyncio_loop.run_until_complete(close_mcp_runtime(mcp_runtime))
+            finally:
+                asyncio.set_event_loop(None)
+                asyncio_loop.close()

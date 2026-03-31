@@ -7,7 +7,9 @@ import pytest
 from codegen.config import CodegenConfigError, load_config, resolve_config_file_path
 
 
-def test_load_defaults(tmp_path: Path) -> None:
+def test_load_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEGEN_WEB_FETCH_ENABLED", raising=False)
     cfg = load_config(workspace=tmp_path)
     assert cfg.model == "gpt-4o-mini"
     assert cfg.base_url is None
@@ -16,6 +18,29 @@ def test_load_defaults(tmp_path: Path) -> None:
     assert cfg.web_fetch_enabled is False
     assert cfg.web_fetch_max_bytes == 262_144
     assert cfg.web_fetch_timeout_seconds == 30
+    assert cfg.mcp_servers == []
+
+
+def test_mcp_servers_toml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("CODEGEN_WEB_FETCH_ENABLED", raising=False)
+    (tmp_path / "codegen.toml").write_text(
+        '\n'.join(
+            [
+                '[[mcp_servers]]',
+                'name = "demo"',
+                'command = "npx"',
+                'args = ["-y", "@scope/pkg"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = load_config(workspace=tmp_path)
+    assert len(cfg.mcp_servers) == 1
+    assert cfg.mcp_servers[0].name == "demo"
+    assert cfg.mcp_servers[0].command == "npx"
+    assert cfg.mcp_servers[0].args == ["-y", "@scope/pkg"]
 
 
 def test_load_from_toml(tmp_path: Path) -> None:

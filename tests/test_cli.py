@@ -70,6 +70,21 @@ def test_run_help() -> None:
     assert "--workspace" in out or "-w" in out
 
 
+def test_mcp_check_help() -> None:
+    r = _run("mcp-check", "--help")
+    assert r.returncode == 0
+    out = r.stdout + r.stderr
+    assert "mcp-check" in out.lower()
+    assert "--workspace" in out or "-w" in out
+
+
+def test_mcp_check_without_servers(tmp_path: Path) -> None:
+    r = _run("-w", str(tmp_path), "mcp-check")
+    assert r.returncode == 2
+    out = (r.stdout + r.stderr).lower()
+    assert "no mcp servers configured" in out
+
+
 def test_run_accepts_workspace_after_task(tmp_path: Path) -> None:
     """``-w`` after ``run`` must be recognized (not a global-only option)."""
     env = os.environ.copy()

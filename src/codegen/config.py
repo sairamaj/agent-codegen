@@ -20,6 +20,22 @@ class CodegenConfigError(Exception):
     """Invalid configuration file or merged settings."""
 
 
+class McpServerEntry(BaseModel):
+    """One MCP server started over stdio (Phase 3, FR-TOOL-9)."""
+
+    name: str = Field(..., min_length=1, max_length=64, description="Stable id for this server (unique in config).")
+    command: str = Field(..., min_length=1, description="Executable to spawn (e.g. npx, uvx).")
+    args: list[str] = Field(default_factory=list, description="Arguments after command.")
+    env: dict[str, str] | None = Field(
+        default=None,
+        description="Optional extra environment variables for the server process.",
+    )
+    cwd: str | None = Field(
+        default=None,
+        description="Working directory for the server (absolute or relative to workspace).",
+    )
+
+
 class CodegenConfig(BaseModel):
     """
     Merged configuration after file + environment.
@@ -46,6 +62,7 @@ class CodegenConfig(BaseModel):
     - CODEGEN_WEB_FETCH_ENABLED — ``true`` / ``false`` (default false): enable optional web_fetch tool (P2-07).
     - CODEGEN_WEB_FETCH_MAX_BYTES — max response bytes (default 262144).
     - CODEGEN_WEB_FETCH_TIMEOUT_SECONDS — per-request timeout (default 30).
+    - MCP servers — optional ``[[mcp_servers]]`` tables in TOML (Phase 3, FR-TOOL-9); see docs/mcp-howto.md.
     """
 
     model: str = Field(default="gpt-4o-mini", description="OpenAI model id.")
@@ -125,6 +142,22 @@ class CodegenConfig(BaseModel):
         le=600,
         description="HTTP client timeout for web_fetch (seconds).",
     )
+    # P3-E1: MCP stdio servers (FR-TOOL-9)
+    mcp_servers: list[McpServerEntry] = Field(
+        default_factory=list,
+        description="Optional MCP servers; tools are merged into the model tool list.",
+    )
+
+    @field_validator("mcp_servers", mode="before")
+    @classmethod
+    def validate_mcp_servers_count(cls, v: Any) -> list[Any]:
+        if v is None:
+            return []
+        if not isinstance(v, list):
+            raise ValueError("mcp_servers must be a list of tables")
+        if len(v) > 16:
+            raise ValueError("mcp_servers: at most 16 servers allowed")
+        return v
 
     @field_validator("web_fetch_enabled", mode="before")
     @classmethod
@@ -224,6 +257,8 @@ class CodegenConfig(BaseModel):
             "web_fetch_enabled": self.web_fetch_enabled,
             "web_fetch_max_bytes": self.web_fetch_max_bytes,
             "web_fetch_timeout_seconds": self.web_fetch_timeout_seconds,
+            "mcp_servers_count": len(self.mcp_servers),
+            "mcp_server_names": [s.name for s in self.mcp_servers],
         }
 
     def _structured_log_public(self) -> str | None:
@@ -350,7 +385,8 @@ def load_config(
     verification_hooks (array of strings), verification_failure (fail or warn),
     respect_gitignore (boolean, default true),
     session_file (path or session name), max_history_chars (integer),
-    web_fetch_enabled (boolean, default false), web_fetch_max_bytes, web_fetch_timeout_seconds.
+    web_fetch_enabled (boolean, default false),     web_fetch_max_bytes, web_fetch_timeout_seconds,
+    mcp_servers (array of tables: name, command, args, optional env, optional cwd).
     """
     file_data: dict[str, Any] = {}
     resolved = resolve_config_file_path(workspace=workspace, config_path=config_path)

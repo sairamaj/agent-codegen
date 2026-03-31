@@ -359,3 +359,45 @@ def test_run_prints_user_line_and_redacts_tool_args(tmp_path: Path) -> None:
     assert task in text
     assert secret not in text
     assert "read_file" in text
+
+
+def test_mcp_startup_failure_is_warn_and_continue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg = CodegenConfig(
+        model="gpt-4o-mini",
+        openai_api_key="sk-test",
+        max_iterations=5,
+        max_wall_clock_seconds=60,
+        mcp_servers=[{"name": "x", "command": "npx", "args": ["-y", "bad-server"]}],
+    )
+    client = MagicMock()
+    stream = _FakeStream(
+        [
+            _FakeChunk(_FakeDelta(content="No MCP, still works.")),
+            _FakeChunk(_FakeDelta(), finish_reason="stop"),
+        ]
+    )
+    client.chat.completions.create.return_value = stream
+
+    async def _boom(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("Connection closed")
+
+    monkeypatch.setattr("codegen.agent_loop.connect_mcp_runtime", _boom)
+
+    buf = io.StringIO()
+    console = make_console(file=buf)
+    out = run_agent_task(
+        workspace=tmp_path,
+        config=cfg,
+        system_prompt="sys",
+        user_message="hello",
+        console=console,
+        client=client,
+    )
+    assert out.exit_code == 0
+    assert out.stop_reason == "stop"
+    text = buf.getvalue().lower()
+    assert "continuing without mcp tools" in text
+    assert client.chat.completions.create.call_count == 1

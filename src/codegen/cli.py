@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from collections.abc import Callable
@@ -15,6 +16,7 @@ from codegen.agent_loop import AgentRunResult, run_agent_task
 from codegen.bootstrap import bootstrap
 from codegen.config import CodegenConfigError
 from codegen.console import make_console
+from codegen.mcp_runtime import close_mcp_runtime, connect_mcp_runtime
 from codegen.observability import (
     new_trace_id,
     normalize_structured_log_destination,
@@ -44,7 +46,8 @@ app = typer.Typer(
         "CODEGEN_COMMAND_DENYLIST, CODEGEN_COMMAND_REQUIRE_APPROVAL, CODEGEN_SHELL_TIMEOUT_SECONDS, "
         "CODEGEN_SHELL_MAX_OUTPUT_BYTES, CODEGEN_VERIFICATION_HOOKS, CODEGEN_VERIFICATION_FAILURE, "
         "CODEGEN_RESPECT_GITIGNORE, CODEGEN_SESSION_FILE, CODEGEN_MAX_HISTORY_CHARS, "
-        "CODEGEN_WEB_FETCH_ENABLED, CODEGEN_WEB_FETCH_MAX_BYTES, CODEGEN_WEB_FETCH_TIMEOUT_SECONDS."
+        "CODEGEN_WEB_FETCH_ENABLED, CODEGEN_WEB_FETCH_MAX_BYTES, CODEGEN_WEB_FETCH_TIMEOUT_SECONDS. "
+        "Optional MCP: [[mcp_servers]] in TOML (see docs/mcp-howto.md)."
     ),
 )
 
@@ -182,6 +185,13 @@ def info_cmd(
             if summary["web_fetch_enabled"]
             else "off"
         )
+        console.print("[muted]mcp_servers:[/muted] ", end="")
+        n_mcp = summary.get("mcp_servers_count", 0)
+        if n_mcp:
+            names = summary.get("mcp_server_names") or []
+            console.print(f"{n_mcp} configured ({', '.join(names)})")
+        else:
+            console.print("(none)")
 
     if result.project_rules_text is None:
         console.print("[muted]project rules:[/muted] ", end="")
@@ -199,20 +209,28 @@ def _build_system_prompt(
     agent_mode: Literal["plan", "execute"] = "execute",
     respect_gitignore: bool = True,
     web_fetch_enabled: bool = False,
+    mcp_servers_count: int = 0,
 ) -> str:
     wf = (
         "web_fetch (optional HTTP GET to public https/http URLs, size- and time-bounded; truncation is explicit in results), "
         if web_fetch_enabled
         else ""
     )
+    mcp_note = (
+        " Additional tools from configured MCP servers appear as functions named mcp__… (see docs/mcp-howto.md)."
+        if mcp_servers_count > 0
+        else ""
+    )
     tools_line = (
-        f"You have tools: read_file, list_dir, grep, {wf}apply_patch (structured edits), run_terminal_cmd. "
+        f"You have tools: read_file, list_dir, grep, {wf}apply_patch (structured edits), run_terminal_cmd."
+        f"{mcp_note} "
         "If the workspace config lists verification_hooks, they run automatically after a fully "
         "successful apply_patch; check the verification field in the tool result (policy fail vs warn). "
         if agent_mode == "execute"
         else (
             "You have read-only tools: read_file, list_dir, grep"
             + (", web_fetch (optional HTTP GET to public URLs, bounded)" if web_fetch_enabled else "")
+            + mcp_note
             + ". "
         )
     )
@@ -251,6 +269,76 @@ def _merged_workspace_config(
 def _interactive_repl_quit(line: str) -> bool:
     t = line.strip().lower()
     return t in ("exit", "quit", ":q")
+
+
+@app.command("mcp-check")
+def mcp_check_cmd(
+    ctx: typer.Context,
+    workspace: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--workspace",
+            "-w",
+            help="Workspace root (overrides global ``-w`` when placed after ``mcp-check``).",
+        ),
+    ] = None,
+    config: Annotated[
+        Optional[Path],
+        typer.Option(
+            "--config",
+            "-c",
+            help="Config file (overrides global ``-c`` when placed after ``mcp-check``).",
+        ),
+    ] = None,
+) -> None:
+    """Start each configured MCP server and verify initialize + tools/list."""
+    console = make_console()
+    workspace_arg, config_arg = _merged_workspace_config(ctx, workspace, config)
+
+    try:
+        result = bootstrap(workspace_arg, config_arg)
+    except WorkspaceError as e:
+        console.print(f"[error]{e}[/error]")
+        raise typer.Exit(1) from e
+    except CodegenConfigError as e:
+        console.print(f"[error]{e}[/error]")
+        raise typer.Exit(2) from e
+
+    servers = list(result.config.mcp_servers)
+    if not servers:
+        console.print("[warn]No MCP servers configured. Add [[mcp_servers]] to codegen.toml.[/warn]")
+        raise typer.Exit(2)
+
+    console.print("[muted]workspace:[/muted] ", end="")
+    console.print(str(result.workspace))
+    console.print(f"[muted]mcp servers:[/muted] {len(servers)} configured")
+
+    failures = 0
+    for s in servers:
+        console.print(f"[tool]›[/tool] checking MCP server [tool]{s.name}[/tool] ...")
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        runtime = None
+        try:
+            runtime = loop.run_until_complete(connect_mcp_runtime(result.workspace, [s]))
+            n = len(runtime.openai_tool_definitions)
+            preview = ", ".join(d["function"]["name"] for d in runtime.openai_tool_definitions[:3])
+            extra = "" if n <= 3 else f", +{n - 3} more"
+            console.print(f"[ok]ok[/ok] {s.name}: {n} tool(s)" + (f" ({preview}{extra})" if n else ""))
+        except Exception as e:
+            failures += 1
+            console.print(f"[error]failed[/error] {s.name}: {e}")
+        finally:
+            try:
+                if runtime is not None:
+                    loop.run_until_complete(close_mcp_runtime(runtime))
+            finally:
+                asyncio.set_event_loop(None)
+                loop.close()
+
+    if failures:
+        raise typer.Exit(1)
+    console.print("[ok]All configured MCP servers passed startup + list_tools checks.[/ok]")
 
 
 @app.command("run")
@@ -340,6 +428,7 @@ def run_cmd(
         agent_mode=agent_mode,
         respect_gitignore=result.config.respect_gitignore,
         web_fetch_enabled=result.config.web_fetch_enabled,
+        mcp_servers_count=len(result.config.mcp_servers),
     )
     trace_id = new_trace_id()
     session_path = resolve_session_storage_path(

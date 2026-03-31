@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from codegen.command_policy import CommandPolicy, command_policy_from_config
 from codegen.config import CodegenConfig
+from codegen.mcp_runtime import McpRuntime
 from codegen.gitignore_filter import GitignoreMatcher
 from codegen.tools_patch import APPLY_PATCH_TOOL_DEFINITION, apply_patch
 from codegen.tools_terminal import RUN_TERMINAL_CMD_TOOL_DEFINITION, run_terminal_cmd
@@ -115,10 +116,12 @@ def tool_definitions_for_mode(
     mode: Literal["plan", "execute"],
     *,
     config: CodegenConfig | None = None,
+    mcp_runtime: McpRuntime | None = None,
 ) -> list[dict[str, Any]]:
     """Plan mode exposes only read-only tools; execute adds patch + shell.
 
     Optional ``web_fetch`` is registered when ``config.web_fetch_enabled`` is true (P2-07).
+    Optional MCP tools are appended when ``mcp_runtime`` is provided (P3-E1).
     """
     defs = list(_READONLY_TOOL_DEFINITIONS)
     if config is not None and config.web_fetch_enabled:
@@ -126,6 +129,8 @@ def tool_definitions_for_mode(
     if mode == "execute":
         defs.append(APPLY_PATCH_TOOL_DEFINITION)
         defs.append(RUN_TERMINAL_CMD_TOOL_DEFINITION)
+    if mcp_runtime is not None and mcp_runtime.openai_tool_definitions:
+        defs.extend(mcp_runtime.openai_tool_definitions)
     return defs
 
 
@@ -390,6 +395,7 @@ def execute_tool(
     *,
     dispatch: ToolDispatchContext | None = None,
     config: CodegenConfig | None = None,
+    mcp_runtime: McpRuntime | None = None,
 ) -> str:
     """Run a tool by name; always returns a string (JSON object) for the model."""
     ctx = dispatch or ToolDispatchContext()
@@ -399,6 +405,9 @@ def execute_tool(
             return _tool_error("INVALID_ARGUMENT", "Tool arguments must be a JSON object")
     except json.JSONDecodeError as e:
         return _tool_error("INVALID_JSON", f"Invalid tool arguments JSON: {e}")
+
+    if mcp_runtime is not None and mcp_runtime.is_mcp_tool(name):
+        return mcp_runtime.call_tool_sync(name, args)
 
     if ctx.agent_mode == "plan" and name in ("apply_patch", "run_terminal_cmd"):
         return _tool_error(

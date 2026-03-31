@@ -130,6 +130,19 @@ def tool_context_debug_fields(tool_name: str, result_json: str) -> dict[str, Any
                 "context_web_fetch_bytes": int(d.get("bytes_read") or 0),
             }
 
+    if d.get("mcp") is True:
+        srv = d.get("server")
+        mt = d.get("tool")
+        paths: list[str] = []
+        if isinstance(srv, str):
+            paths.append(srv)
+        return {
+            "context_paths": paths[:_CONTEXT_PATHS_LOG_MAX],
+            "context_path_count": len(paths),
+            "context_mcp_server": srv if isinstance(srv, str) else None,
+            "context_mcp_tool": mt if isinstance(mt, str) else None,
+        }
+
     return {}
 
 
