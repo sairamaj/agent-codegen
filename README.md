@@ -4,10 +4,15 @@
 
 **Codegen** is a small **CLI coding agent**: you describe a task in natural language, and an **OpenAI** model drives a **transparent tool loop** (read files, search, apply patches, run shell commands—depending on mode and configuration) inside a **fixed workspace root**. It is built as an **educational** project: the goal is to **see how agent-style tools, streaming, policy, and sessions fit together**, not to replace a full IDE.
 
-- **What it does:** `codegen run "<task>"` sends your task to the model; the agent may call tools repeatedly until it finishes or hits limits.
+- **What it does:** `codegen run "<task>"` sends your task to the model; the agent may call tools repeatedly until it finishes or hits limits. Optional **MCP** servers add more tools via stdio (see **MCP** under Examples).
 - **Why it exists:** To learn how **message → tool calls → execution → repeat** works with the official SDK, clear modules, and phased features (read-only exploration vs edits, approvals, audit logs, etc.).
 
 Details: [docs/codegen_requirements.md](docs/codegen_requirements.md), [docs/codegen_stories.md](docs/codegen_stories.md).
+
+---
+![codegen](./docs/codegen.png)
+
+---
 
 **Requirements:** Python **3.11+**. An **OpenAI API key** (`OPENAI_API_KEY`) is required for `run`.
 
@@ -24,6 +29,7 @@ codegen --help
 codegen --version
 codegen run --help
 codegen info --help
+codegen mcp-check --help
 ```
 
 ### Inspect workspace and config (no API calls)
@@ -124,6 +130,44 @@ codegen run "Summarize the first screen of text from https://docs.python.org/3/t
 codegen run "What version string appears on the PyPI JSON for the 'httpx' project? Use https://pypi.org/pypi/httpx/json"
 ```
 
+### MCP (Model Context Protocol)
+
+**Optional.** When you define **stdio MCP servers** in config, their tools are merged with built-in tools for each `codegen run`. The `mcp` Python package is installed with Codegen (`pip install -e .`); you still need whatever each server uses (for example **Node** for `npx`-based servers).
+
+**1. Configure** in **`codegen.toml`** or **`.codegen.toml`** in the workspace (or the file from `--config` / `CODEGEN_CONFIG`). Add one or more `[[mcp_servers]]` tables (at most **16** servers). Required: `name` (unique id) and `command`. Optional: `args` (array of strings), `env` (string key/value table), `cwd` (absolute path or path relative to the **workspace**).
+
+```toml
+[[mcp_servers]]
+name = "repo_fs"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path/to/allowed/root"]
+
+[[mcp_servers]]
+name = "memory"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-memory"]
+```
+
+**2. Verify** connectivity (starts each server, runs initialize and `tools/list`, then shuts down—no API key needed for this step):
+
+```bash
+codegen -w /path/to/project mcp-check
+```
+
+**3. Confirm** in the config summary:
+
+```bash
+codegen -w /path/to/project info
+```
+
+You should see `mcp_servers:` with a count and server names.
+
+**4. Run** as usual; the model sees extra functions named `mcp__<server_name>__<mcp_tool_name>` (descriptions are prefixed with `[MCP server: …]`). Servers are **started when a run begins** and **stopped when it ends**. If startup fails, the CLI prints a warning and continues **without** MCP tools.
+
+**Behavior notes:** Transport is **stdio only** (subprocess). **Plan** and **execute** modes both expose MCP tools; built-in `apply_patch` and `run_terminal_cmd` stay plan-gated as before. Shell **allow/deny/approval** applies to `run_terminal_cmd`, not to MCP—treat MCP servers with the same trust as shell access.
+
+Full field reference, observability (`CODEGEN_STRUCTURED_LOG`, `CODEGEN_SESSION_AUDIT`), and troubleshooting: [docs/mcp-howto.md](docs/mcp-howto.md).
+
 ### Module invocation (same as the `codegen` script after install)
 
 ```bash
@@ -201,4 +245,4 @@ python -m pytest
 
 ## Maintaining this README
 
-When behavior or flags change, update **Examples** and **How to run** so newcomers can copy-paste successfully. Full FR/NFR and roadmap stay in `docs/codegen_requirements.md` and `docs/codegen_stories.md`.
+When behavior or flags change, update **Examples** and **How to run** so newcomers can copy-paste successfully. MCP details also live in `docs/mcp-howto.md`. Full FR/NFR and roadmap stay in `docs/codegen_requirements.md` and `docs/codegen_stories.md`.
